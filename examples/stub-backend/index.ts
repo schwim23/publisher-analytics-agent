@@ -31,9 +31,13 @@ function* eachDate(start: string, end: string): Generator<string> {
 }
 
 function pseudo(seed: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) h = (h ^ seed.charCodeAt(i)) * 16777619;
-  return Math.abs(h) / 0x7fffffff;
+  // FNV-1a 32-bit, with `| 0` to keep h in signed 32-bit range each step.
+  let h = 2166136261 | 0;
+  for (let i = 0; i < seed.length; i++) {
+    h = (h ^ seed.charCodeAt(i)) | 0;
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 1_000_000) / 1_000_000;
 }
 
 const stubClient: DataClient = {
