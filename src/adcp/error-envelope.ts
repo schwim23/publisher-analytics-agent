@@ -52,7 +52,7 @@ function inferCodeFromMessage(message: string): AdCPErrorCode {
 
 function recoveryFor(code: AdCPErrorCode): string {
   switch (code) {
-    case 'AUTH_REQUIRED': return 'Provide a valid Bearer token via the x-adcp-auth header';
+    case 'AUTH_REQUIRED': return 'Provide a valid Bearer token via the Authorization header';
     case 'REFERENCE_NOT_FOUND': return 'Verify the resource ID exists and the caller is authorized for it';
     case 'VALIDATION_ERROR': return 'Check the request payload against the tool input schema';
     case 'RATE_LIMITED': return 'Retry after backoff';

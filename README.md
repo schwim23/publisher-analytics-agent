@@ -90,7 +90,7 @@ Smoke-test the HTTP server:
 curl -sS http://localhost:7000/healthz
 curl -sS http://localhost:7000/.well-known/brand.json
 curl -sS -X POST http://localhost:7000/mcp/ \
-  -H "x-adcp-auth: Bearer test-token" \
+  -H "Authorization: Bearer test-token" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoketest","version":"0.1"}},"id":0}'
@@ -100,7 +100,7 @@ curl -sS -X POST http://localhost:7000/mcp/ \
 
 ## Backend 2: AdCP-conformant server
 
-`AdCPBuyerClient` implements `DataClient` against any server speaking the AdCP HTTP/JSON spec (`/v1/media-buys`, `/v1/products`, `/v1/audit-logs`, etc.). Zero implementation, just configuration:
+`AdCPBuyerClient` implements `DataClient` against any server speaking AdCP 3.0 — **MCP/JSON-RPC over HTTP** at `/mcp/`, with `Authorization: Bearer <token>` auth. The client invokes the spec's MCP tools (`get_media_buys`, `get_products`, `get_media_buy_delivery`, `get_media_buy_artifacts`, `check_governance`); no REST endpoints are assumed.
 
 ```ts
 import {
@@ -109,7 +109,7 @@ import {
 } from 'publisher-analytics-agent';
 
 const dataClient = new AdCPBuyerClient({
-  baseUrl: process.env.ADCP_BASE_URL!,
+  baseUrl: process.env.ADCP_BASE_URL!,   // e.g. https://adcp.your-vendor.com
   apiKey: process.env.ADCP_API_KEY!,
 });
 
@@ -119,6 +119,8 @@ await createPublisherAnalyticsServer({
   agent: { id: 'my-pub', name: 'My Publisher Analytics', version: '0.1.0' },
 });
 ```
+
+The base URL can point at the host root (`https://adcp.example.com`) or directly at `/mcp/` — the client normalizes either form. Tool argument shapes are best-effort against AdCP 3.0 conventions; if your conformance suite enforces specific keys/casing, override per-tool by subclassing or call MCP tools directly via `getRawClient()`.
 
 To exercise this without provisioning your own server, the [Prebid `salesagent`](https://github.com/adcontextprotocol/salesagent) repo ships a Dockerized mock AdCP server.
 
@@ -221,7 +223,7 @@ const handle = await createPublisherAnalyticsServer({
   agent: { id: 'my-pub', name: 'My Publisher', version: '0.1.0' },
   port: 7000,
   host: '127.0.0.1',                   // bind address
-  bearerToken: process.env.BEARER,     // required in `x-adcp-auth` header
+  bearerToken: process.env.BEARER,     // required in `Authorization: Bearer <token>` header
 
   // Optional well-known endpoints — passed through verbatim as JSON
   wellKnownAdagents: { agents: [/* publisher's authorized agents */] },
@@ -238,7 +240,7 @@ Endpoints:
 
 | Endpoint | What it does |
 |---|---|
-| `POST /mcp/` | MCP-over-HTTP. `x-adcp-auth: Bearer <token>` required. |
+| `POST /mcp/` | MCP-over-HTTP. `Authorization: Bearer <token>` required. (`x-adcp-auth` accepted as a deprecated alias for one minor version.) |
 | `GET /.well-known/adagents.json` | Authorized-agents manifest, if `wellKnownAdagents` was provided. |
 | `GET /.well-known/brand.json` | Brand manifest, if `wellKnownBrand` was provided. |
 | `GET /healthz` | Health check. No auth. |
@@ -259,7 +261,7 @@ The agent exposes nine tools over MCP:
 | `get_yield_anomalies` | eCPM and fill drops vs. baseline period, with inferred causes. |
 | `get_inventory_forecast` | Project available impressions for an ad unit over a future range. |
 | `compare_periods` | WoW / MoM / YoY / custom-range comparisons. |
-| `get_plan_audit_logs` | AdCP plan and decision audit trail. |
+| `get_plan_audit_logs` | Publisher-side audit trail. The AdCP backend (when used) maps this to the spec's `get_media_buy_artifacts` task. Returns empty for backends that don't expose an audit trail (e.g. GAM). |
 | `generate_visualization` | Turn a tool result into a chart spec (line / bar / area / pie). |
 | `get_adcp_capabilities` | AdCP capability envelope: protocol, specialisms, extensions, supported transports. |
 

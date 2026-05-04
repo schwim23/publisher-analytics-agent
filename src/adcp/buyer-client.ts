@@ -1,3 +1,5 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type {
   AdCPConfig,
   MediaBuy,
@@ -10,61 +12,115 @@ import type {
 import type { DataClient, DeliveryQuery } from '../data-client.js';
 
 /**
- * AdCP-spec HTTP client. Implements `DataClient`, so it can serve as a backend for the
- * publisher-analytics-agent when delivery data lives behind an AdCP-conformant server
- * (rather than being read from a native ad-server SOAP/REST API).
+ * AdCP-conformant client. Implements `DataClient` against any server speaking the
+ * AdCP 3.0 protocol — MCP/JSON-RPC over HTTP, with `Authorization: Bearer <token>`
+ * authentication.
  *
- * In a typical deployment this is also the surface used to reach buyer-side AdCP agents
- * for cross-checks against publisher-side numbers — e.g., comparing `getMediaBuyDelivery`
- * results against the publisher's own delivery reports.
+ * The client connects to the AdCP server's `/mcp/` endpoint and invokes the spec's
+ * MCP tools (`get_media_buys`, `get_products`, `get_media_buy_delivery`,
+ * `get_media_buy_artifacts`, `check_governance`) rather than hitting REST paths
+ * (which AdCP 3.0 does not define).
+ *
+ * **Argument shapes are best-effort against the AdCP 3.0 conventions.** If your
+ * conformance suite or server enforces specific keys/casing, override per-tool by
+ * subclassing or wrapping the MCP `client` directly via `getRawClient()`. PRs
+ * tightening the shapes against ratified spec are welcome.
  */
 export class AdCPBuyerClient implements DataClient {
-  private baseUrl: string;
-  private apiKey: string;
+  private readonly endpoint: URL;
+  private readonly apiKey: string;
+  private readonly mcp: Client;
+  private readonly transport: StreamableHTTPClientTransport;
+  private connectPromise: Promise<void> | null = null;
 
   constructor(config: AdCPConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/$/, '');
+    const u = new URL(config.baseUrl);
+    if (!u.pathname.endsWith('/mcp/') && !u.pathname.endsWith('/mcp')) {
+      u.pathname = u.pathname.replace(/\/?$/, '/mcp/');
+    }
+    this.endpoint = u;
     this.apiKey = config.apiKey;
-  }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        ...init?.headers,
+    this.transport = new StreamableHTTPClientTransport(this.endpoint, {
+      requestInit: {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
       },
     });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`AdCP ${res.status}: ${body}`);
+    this.mcp = new Client(
+      { name: 'publisher-analytics-buyer-client', version: '0.1.0' },
+      { capabilities: {} },
+    );
+  }
+
+  /** Lazy connect — first tool call establishes the MCP session. */
+  private async ensureConnected(): Promise<void> {
+    if (!this.connectPromise) {
+      this.connectPromise = this.mcp.connect(this.transport);
     }
-    return res.json() as Promise<T>;
+    return this.connectPromise;
+  }
+
+  /** Escape hatch for callers who need to invoke tools or methods outside this DataClient surface. */
+  async getRawClient(): Promise<Client> {
+    await this.ensureConnected();
+    return this.mcp;
+  }
+
+  async close(): Promise<void> {
+    if (this.connectPromise) {
+      await this.transport.close();
+      this.connectPromise = null;
+    }
+  }
+
+  private async callTool<T = unknown>(name: string, args: Record<string, unknown> = {}): Promise<T> {
+    await this.ensureConnected();
+    const result = (await this.mcp.callTool({ name, arguments: args })) as unknown as {
+      content?: Array<{ type?: string; text?: string }>;
+      isError?: boolean;
+    };
+    if (result.isError) {
+      throw new Error(`AdCP tool ${name} returned an error: ${extractText(result)}`);
+    }
+    return parseJsonResult<T>(name, result);
   }
 
   async listMediaBuys(filters?: { status?: string; publisherId?: string }): Promise<MediaBuy[]> {
-    const params = new URLSearchParams(filters as Record<string, string>);
-    return this.request<MediaBuy[]>(`/v1/media-buys?${params}`);
+    const args: Record<string, unknown> = {};
+    if (filters?.status) args.status = filters.status;
+    if (filters?.publisherId) args.publisher_id = filters.publisherId;
+    const res = await this.callTool<{ media_buys?: MediaBuy[] } | MediaBuy[]>('get_media_buys', args);
+    return Array.isArray(res) ? res : (res.media_buys ?? []);
   }
 
   async getMediaBuyDelivery(mediaBuyId: string, dateRange?: { start: string; end: string }): Promise<DeliveryReport[]> {
-    const params = new URLSearchParams(dateRange as Record<string, string>);
-    return this.request<DeliveryReport[]>(`/v1/media-buys/${mediaBuyId}/delivery?${params}`);
+    const args: Record<string, unknown> = { media_buy_id: mediaBuyId };
+    if (dateRange) {
+      args.start_date = dateRange.start;
+      args.end_date = dateRange.end;
+    }
+    const res = await this.callTool<{ delivery?: DeliveryReport[] } | DeliveryReport[]>('get_media_buy_delivery', args);
+    return Array.isArray(res) ? res : (res.delivery ?? []);
   }
 
   async checkGovernance(mediaBuyId: string): Promise<GovernanceResult> {
-    return this.request<GovernanceResult>(`/v1/governance/check`, {
-      method: 'POST',
-      body: JSON.stringify({ media_buy_id: mediaBuyId }),
-    });
+    return this.callTool<GovernanceResult>('check_governance', { media_buy_id: mediaBuyId });
   }
 
   async getProducts(params: { publisherId?: string; format?: string; brief?: string }): Promise<InventoryProduct[]> {
-    const qs = new URLSearchParams(params as Record<string, string>);
-    return this.request<InventoryProduct[]>(`/v1/products?${qs}`);
+    const args: Record<string, unknown> = {};
+    if (params.publisherId) args.publisher_id = params.publisherId;
+    if (params.format) args.format = params.format;
+    if (params.brief) args.brief = params.brief;
+    const res = await this.callTool<{ products?: InventoryProduct[] } | InventoryProduct[]>('get_products', args);
+    return Array.isArray(res) ? res : (res.products ?? []);
   }
 
+  /**
+   * Maps the AdCP `get_media_buy_artifacts` tool — the spec's per-buy decision/action trail.
+   * This is named `getPlanAuditLogs` in the consumer-facing tool surface for backward
+   * compatibility with existing Claude Desktop integrations.
+   */
   async getPlanAuditLogs(params: {
     mediaBuyId?: string;
     planId?: string;
@@ -72,10 +128,18 @@ export class AdCPBuyerClient implements DataClient {
     endDate?: string;
     limit?: number;
   }): Promise<AuditLogEntry[]> {
-    const qs = new URLSearchParams(
-      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+    const args: Record<string, unknown> = {};
+    if (params.mediaBuyId) args.media_buy_id = params.mediaBuyId;
+    if (params.planId) args.plan_id = params.planId;
+    if (params.startDate) args.start_date = params.startDate;
+    if (params.endDate) args.end_date = params.endDate;
+    if (params.limit !== undefined) args.limit = params.limit;
+    const res = await this.callTool<{ artifacts?: AuditLogEntry[]; logs?: AuditLogEntry[] } | AuditLogEntry[]>(
+      'get_media_buy_artifacts',
+      args,
     );
-    return this.request<AuditLogEntry[]>(`/v1/audit-logs?${qs}`);
+    if (Array.isArray(res)) return res;
+    return res.artifacts ?? res.logs ?? [];
   }
 
   async getDeliveryReport(query: DeliveryQuery): Promise<DeliveryRow[]> {
@@ -107,5 +171,19 @@ export class AdCPBuyerClient implements DataClient {
         reports: await this.getMediaBuyDelivery(mb.id, dateRange),
       })),
     );
+  }
+}
+
+function extractText(result: { content?: Array<{ type?: string; text?: string }> }): string {
+  return result.content?.map((c) => c.text ?? '').join('\n') ?? '';
+}
+
+function parseJsonResult<T>(toolName: string, result: { content?: Array<{ type?: string; text?: string }> }): T {
+  const text = extractText(result);
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch (e) {
+    throw new Error(`AdCP tool ${toolName} returned non-JSON content: ${text.slice(0, 200)}`);
   }
 }

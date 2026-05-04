@@ -62,8 +62,11 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
 
   function isAuthorized(req: IncomingMessage): boolean {
     if (!opts.bearerToken) return true;
-    const header = req.headers['x-adcp-auth'];
-    const presented = Array.isArray(header) ? header[0] : header;
+    // Spec-correct: AdCP uses standard `Authorization: Bearer <token>`.
+    // `x-adcp-auth` is accepted as a deprecated alias to ease migration; remove
+    // in a future minor version once no callers depend on it.
+    const raw = req.headers['authorization'] ?? req.headers['x-adcp-auth'];
+    const presented = Array.isArray(raw) ? raw[0] : raw;
     if (!presented) return false;
     const token = presented.startsWith('Bearer ') ? presented.slice(7) : presented;
     return token === opts.bearerToken;
@@ -78,8 +81,8 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
     writeJson(res, 401, {
       errors: [{
         code: 'AUTH_REQUIRED',
-        message: 'Missing or invalid x-adcp-auth header',
-        recovery: 'Provide a valid Bearer token via the x-adcp-auth header',
+        message: 'Missing or invalid Authorization header',
+        recovery: 'Provide a valid Bearer token via the Authorization header (e.g. `Authorization: Bearer <token>`)',
       }],
       context: { correlation_id: crypto.randomUUID() },
     });

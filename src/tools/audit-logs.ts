@@ -11,7 +11,7 @@ export const auditLogsSchema = z.object({
 
 export const auditLogsTool = {
   name: 'get_plan_audit_logs',
-  description: 'Retrieve the AdCP audit trail for campaigns or plans — who did what, when, and whether it succeeded. Useful for compliance reporting, debugging delivery issues, and understanding agent decision history.',
+  description: 'Publisher-side audit trail for campaigns or plans — who did what, when, with what outcome. The AdCP backend (when used) maps this to the spec\'s `get_media_buy_artifacts` task. Useful for compliance reporting, debugging delivery issues, and understanding agent decision history. Returns empty for backends that don\'t expose an audit trail (e.g. GAM).',
   inputSchema: {
     type: 'object' as const,
     properties: {
