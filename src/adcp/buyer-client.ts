@@ -86,9 +86,11 @@ export class AdCPBuyerClient implements DataClient {
   }
 
   async listMediaBuys(filters?: { status?: string; publisherId?: string }): Promise<MediaBuy[]> {
+    // AdCP 3.0 `get_media_buys` accepts: media_buy_ids, status_filter (single string
+    // or array), include_snapshot, include_history, pagination. `publisherId` from
+    // our generic DataClient surface has no spec equivalent here and is dropped.
     const args: Record<string, unknown> = {};
-    if (filters?.status) args.status = filters.status;
-    if (filters?.publisherId) args.publisher_id = filters.publisherId;
+    if (filters?.status) args.status_filter = filters.status;
     const res = await this.callTool<{ media_buys?: MediaBuy[] } | MediaBuy[]>('get_media_buys', args);
     return Array.isArray(res) ? res : (res.media_buys ?? []);
   }
@@ -108,10 +110,13 @@ export class AdCPBuyerClient implements DataClient {
   }
 
   async getProducts(params: { publisherId?: string; format?: string; brief?: string }): Promise<InventoryProduct[]> {
-    const args: Record<string, unknown> = {};
-    if (params.publisherId) args.publisher_id = params.publisherId;
-    if (params.format) args.format = params.format;
-    if (params.brief) args.brief = params.brief;
+    // AdCP 3.0 `get_products` requires `buying_mode`. v3 strict sellers will reject
+    // calls without it. We default to `wholesale` (catalog listing); if a `brief`
+    // is supplied we switch to `brief` mode and pass it through, as the spec
+    // requires `brief` whenever `buying_mode` is `"brief"`.
+    const args: Record<string, unknown> = params.brief
+      ? { buying_mode: 'brief', brief: params.brief }
+      : { buying_mode: 'wholesale' };
     const res = await this.callTool<{ products?: InventoryProduct[] } | InventoryProduct[]>('get_products', args);
     return Array.isArray(res) ? res : (res.products ?? []);
   }

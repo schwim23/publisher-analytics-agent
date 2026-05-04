@@ -240,7 +240,7 @@ Endpoints:
 
 | Endpoint | What it does |
 |---|---|
-| `POST /mcp/` | MCP-over-HTTP. `Authorization: Bearer <token>` required. (`x-adcp-auth` accepted as a deprecated alias for one minor version.) |
+| `POST /mcp/` | MCP-over-HTTP. `Authorization: Bearer <token>` required. |
 | `GET /.well-known/adagents.json` | Authorized-agents manifest, if `wellKnownAdagents` was provided. |
 | `GET /.well-known/brand.json` | Brand manifest, if `wellKnownBrand` was provided. |
 | `GET /healthz` | Health check. No auth. |

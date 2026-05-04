@@ -12,7 +12,7 @@ export interface HttpServerOptions {
   agent: { id: string; name: string; version: string };
   port?: number;
   host?: string;
-  /** Bearer token required in `x-adcp-auth` header. If unset, no auth check (LOCAL DEV ONLY). */
+  /** Bearer token required in the standard `Authorization: Bearer <token>` header. If unset, no auth check (LOCAL DEV ONLY). */
   bearerToken?: string;
   /** JSON content for `GET /.well-known/adagents.json` (publisher's authorized-agents list). */
   wellKnownAdagents?: unknown;
@@ -62,10 +62,8 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
 
   function isAuthorized(req: IncomingMessage): boolean {
     if (!opts.bearerToken) return true;
-    // Spec-correct: AdCP uses standard `Authorization: Bearer <token>`.
-    // `x-adcp-auth` is accepted as a deprecated alias to ease migration; remove
-    // in a future minor version once no callers depend on it.
-    const raw = req.headers['authorization'] ?? req.headers['x-adcp-auth'];
+    // AdCP 3.0 uses standard `Authorization: Bearer <token>`.
+    const raw = req.headers['authorization'];
     const presented = Array.isArray(raw) ? raw[0] : raw;
     if (!presented) return false;
     const token = presented.startsWith('Bearer ') ? presented.slice(7) : presented;
