@@ -123,8 +123,16 @@ export class AdCPBuyerClient implements DataClient {
 
   /**
    * Maps the AdCP `get_media_buy_artifacts` tool — the spec's per-buy decision/action trail.
-   * This is named `getPlanAuditLogs` in the consumer-facing tool surface for backward
+   * Exposed as `getPlanAuditLogs` in the consumer-facing tool surface for backward
    * compatibility with existing Claude Desktop integrations.
+   *
+   * AdCP shape requirements:
+   * - `media_buy_id` is REQUIRED and singular. When the caller doesn't specify one,
+   *   we fan out across active buys (the spec's `get_media_buys` default).
+   * - Date range goes in `time_range: { start, end }` as ISO 8601 datetimes.
+   *   `start` is inclusive, `end` is exclusive (so we add a day to YYYY-MM-DD ends).
+   * - `plan_id` and `limit` are not in the spec for this tool. `planId` is dropped;
+   *   `limit` is applied client-side to the merged results.
    */
   async getPlanAuditLogs(params: {
     mediaBuyId?: string;
@@ -133,18 +141,29 @@ export class AdCPBuyerClient implements DataClient {
     endDate?: string;
     limit?: number;
   }): Promise<AuditLogEntry[]> {
-    const args: Record<string, unknown> = {};
-    if (params.mediaBuyId) args.media_buy_id = params.mediaBuyId;
-    if (params.planId) args.plan_id = params.planId;
-    if (params.startDate) args.start_date = params.startDate;
-    if (params.endDate) args.end_date = params.endDate;
-    if (params.limit !== undefined) args.limit = params.limit;
-    const res = await this.callTool<{ artifacts?: AuditLogEntry[]; logs?: AuditLogEntry[] } | AuditLogEntry[]>(
-      'get_media_buy_artifacts',
-      args,
-    );
-    if (Array.isArray(res)) return res;
-    return res.artifacts ?? res.logs ?? [];
+    const buyIds = params.mediaBuyId
+      ? [params.mediaBuyId]
+      : (await this.listMediaBuys({ status: 'active' })).map((b) => b.id);
+
+    const timeRange = (params.startDate && params.endDate)
+      ? {
+          start: dateToIsoStart(params.startDate),
+          end: dateToIsoExclusiveEnd(params.endDate),
+        }
+      : undefined;
+
+    const merged: AuditLogEntry[] = [];
+    for (const id of buyIds) {
+      const args: Record<string, unknown> = { media_buy_id: id };
+      if (timeRange) args.time_range = timeRange;
+      const res = await this.callTool<{ artifacts?: AuditLogEntry[]; logs?: AuditLogEntry[] } | AuditLogEntry[]>(
+        'get_media_buy_artifacts',
+        args,
+      );
+      const items = Array.isArray(res) ? res : (res.artifacts ?? res.logs ?? []);
+      merged.push(...items);
+    }
+    return params.limit !== undefined ? merged.slice(0, params.limit) : merged;
   }
 
   async getDeliveryReport(query: DeliveryQuery): Promise<DeliveryRow[]> {
@@ -191,4 +210,16 @@ function parseJsonResult<T>(toolName: string, result: { content?: Array<{ type?:
   } catch (e) {
     throw new Error(`AdCP tool ${toolName} returned non-JSON content: ${text.slice(0, 200)}`);
   }
+}
+
+/** YYYY-MM-DD → ISO 8601 datetime at start-of-day UTC. */
+function dateToIsoStart(date: string): string {
+  return new Date(`${date}T00:00:00Z`).toISOString();
+}
+
+/** YYYY-MM-DD inclusive → ISO 8601 datetime at start-of-next-day UTC (exclusive end). */
+function dateToIsoExclusiveEnd(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString();
 }

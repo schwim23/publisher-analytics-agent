@@ -12,6 +12,16 @@ This package defines:
 
 > **Pre-spec preview.** AdCP 3.0 does not yet define an `analytics` protocol or a `publisher-analytics` specialism. This package declares its surface under the vendor-extension namespace `x-publisher-analytics` while a [forthcoming RFC](https://github.com/adcontextprotocol/adcp/issues) debates ratifying the agent type. See [adcontextprotocol.org](https://adcontextprotocol.org).
 
+### Discovery for buyers
+
+Until the spec ratifies a formal discovery path for analytics agents, buyers calling this agent should:
+
+1. Call `get_adcp_capabilities`.
+2. Check that `extensions["x-publisher-analytics"]` is present.
+3. Read `extensions["x-publisher-analytics"].tools` — that's the list of analytics tools the agent supports. (`client_utilities` lists rendering helpers like `generate_visualization`; treat those as UI affordances, not part of the AdCP data surface.)
+
+The vendor namespace and tools array will become a formal `specialisms: ["publisher-analytics"]` claim once the RFC lands.
+
 ---
 
 ## Architecture
