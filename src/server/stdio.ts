@@ -9,7 +9,6 @@ import type { CapabilitiesContext } from '../adcp/capabilities.js';
 export interface StdioServerOptions {
   dataClient: DataClient;
   agent: { id: string; name: string; version: string };
-  channels?: string[];
 }
 
 export async function startStdioServer(opts: StdioServerOptions): Promise<void> {
@@ -19,7 +18,6 @@ export async function startStdioServer(opts: StdioServerOptions): Promise<void> 
     agentVersion: opts.agent.version,
     toolNames: tools.map((t) => t.name),
     transports: ['stdio'],
-    channels: opts.channels,
   };
 
   const server = new Server(

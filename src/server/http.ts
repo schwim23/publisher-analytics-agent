@@ -18,7 +18,6 @@ export interface HttpServerOptions {
   wellKnownAdagents?: unknown;
   /** JSON content for `GET /.well-known/brand.json` (this brand's named agents). */
   wellKnownBrand?: unknown;
-  channels?: string[];
 }
 
 export interface RunningHttpServer {
@@ -36,7 +35,6 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
     agentVersion: opts.agent.version,
     toolNames: tools.map((t) => t.name),
     transports: ['http'],
-    channels: opts.channels,
   };
 
   const mcpServer = new Server(

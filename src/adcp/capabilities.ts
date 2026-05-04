@@ -1,15 +1,32 @@
 /**
  * `getAdcpCapabilities` — required tool for any AdCP-conformant agent.
  *
- * Until the AdCP spec ratifies a top-level `analytics` protocol with a `publisher-analytics`
- * specialism (see RFC issue at https://github.com/adcontextprotocol/adcp/issues), this agent
- * declares a placeholder `governance` protocol membership and exposes its analytics surface
- * via the `x-publisher-analytics` vendor extension. The same pattern was used by issue #3612
- * for measurement-verification before its specialism was promoted.
+ * The AdCP 3.0 spec doesn't yet define an `analytics` protocol or a `publisher-analytics`
+ * specialism. While a [forthcoming RFC](https://github.com/adcontextprotocol/adcp/issues)
+ * debates ratifying the agent type, this agent declares no `supported_protocols` and
+ * exposes its analytics surface via the `x-publisher-analytics` vendor extension. The
+ * extension is the discovery signal for buyers; declaring a stand-in protocol like
+ * `governance` would falsely imply we implement that protocol's tools.
+ *
+ * Visualizations are tracked separately as a consumer-side utility — they're a UI
+ * affordance, not part of the AdCP data surface.
  */
 
-const ADCP_VERSION = '3.0';
 const RFC_URL = 'https://github.com/adcontextprotocol/adcp/issues';
+
+const ANALYTICS_TOOLS = new Set([
+  'get_delivery_summary',
+  'get_pacing_alerts',
+  'get_morning_briefing',
+  'get_yield_anomalies',
+  'get_inventory_forecast',
+  'compare_periods',
+  'get_plan_audit_logs',
+]);
+
+const CONSUMER_UTILITIES = new Set([
+  'generate_visualization',
+]);
 
 export interface CapabilitiesContext {
   agentId: string;
@@ -17,7 +34,6 @@ export interface CapabilitiesContext {
   agentVersion: string;
   toolNames: string[];
   transports: Array<'stdio' | 'http'>;
-  channels?: string[];
 }
 
 export const capabilitiesTool = {
@@ -30,26 +46,28 @@ export const capabilitiesTool = {
 };
 
 export function buildCapabilities(ctx: CapabilitiesContext) {
-  const analyticsTools = ctx.toolNames.filter((n) => n !== 'get_adcp_capabilities');
+  const tools = ctx.toolNames.filter((n) => n !== 'get_adcp_capabilities');
   return {
-    adcp_version: ADCP_VERSION,
+    adcp: {
+      major_versions: [3],
+      idempotency: { supported: false },
+    },
     agent: {
       id: ctx.agentId,
       name: ctx.agentName,
       version: ctx.agentVersion,
     },
-    supported_protocols: ['governance'],
+    supported_protocols: [] as string[],
     specialisms: [] as string[],
     extensions: {
       'x-publisher-analytics': {
         version: '0.1.0',
         rfc: RFC_URL,
         description: 'Publisher-side aggregate analytics: yield, pacing, inventory forecast, multi-period comparison, anomaly detection. Pre-spec preview.',
-        tools: analyticsTools,
+        tools: tools.filter((n) => ANALYTICS_TOOLS.has(n)),
+        client_utilities: tools.filter((n) => CONSUMER_UTILITIES.has(n)),
       },
     },
-    pricing_models: [] as string[],
-    channels: ctx.channels ?? ['display', 'video', 'ctv'],
     request_signing: { supported: false },
     transports: ctx.transports,
   };
