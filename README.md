@@ -1,16 +1,18 @@
 # publisher-analytics-agent
 
-**Reference implementation of the AdCP publisher analytics agent** — an open-source agent type for yield, pacing, inventory, and audit analytics on ad-server data.
+**An AdCP-adjacent reference agent for publisher yield analytics** — open-source MCP server proposing an experimental `x-publisher-analytics` extension on top of the AdCP envelope.
 
-This package defines:
+> **This is NOT a ratified AdCP specialism.** AdCP 3.0 does not yet define an `analytics` protocol or a `publisher-analytics` specialism. The agent declares no `supported_protocols` or `specialisms`; everything analytics-shaped lives under the **vendor extension** `extensions["x-publisher-analytics"]` with `status: "experimental"`. Schemas may change. See [`EXTENSION_SPEC.md`](./EXTENSION_SPEC.md) for the full extension proposal and [adcontextprotocol.org](https://adcontextprotocol.org) for the underlying spec.
 
-- A pluggable `DataClient` interface that any ad server can implement (GAM, AdCP, DV360, Xandr, custom SSP rollups).
-- The standard tool surface — `get_delivery_summary`, `get_pacing_alerts`, `get_yield_anomalies`, `get_inventory_forecast`, `compare_periods`, `get_morning_briefing`, `get_plan_audit_logs`, `generate_visualization`, `get_adcp_capabilities`.
-- An AdCP-conformant server: stdio MCP for Claude Desktop, HTTP MCP for network calls, `getAdcpCapabilities` discovery, bearer-auth, `.well-known/adagents.json` and `.well-known/brand.json` static endpoints.
-- Pure analysis helpers (anomaly detection, pacing, forecasting) that operate on any `DataClient` implementation.
-- An in-memory **stub backend** for credential-free demos.
+This package provides:
 
-> **Pre-spec preview.** AdCP 3.0 does not yet define an `analytics` protocol or a `publisher-analytics` specialism. This package declares its surface under the vendor-extension namespace `x-publisher-analytics` while a [forthcoming RFC](https://github.com/adcontextprotocol/adcp/issues) debates ratifying the agent type. See [adcontextprotocol.org](https://adcontextprotocol.org).
+- **Schema-first contracts.** Every tool validates inputs and outputs against Zod schemas in `src/extension/schemas.ts`. Responses include both `structuredContent` (validated object) and `content` (concise text summary), so downstream agents get strong shapes and chat clients get readable summaries.
+- **Pluggable backend.** A `DataClient` interface any ad server can implement — GAM, AdCP-spec'd buyer servers, DV360, Xandr, custom SSP rollups. Backends mark unavailable fields as `null` and emit `DataQualityWarning`s with provenance, so tools never silently lie.
+- **Realistic publisher data model.** `DeliveryRow` carries 30+ optional fields covering ad requests, match/fill rates, viewability, bid/win/timeout rates, floor prices, demand-channel/SSP/deal/format, consent + identity availability, creative status, and freshness timestamps. Tools degrade gracefully when fields are missing.
+- **Honest analytics.** Anomaly detection emits *hypotheses* with confidence + evidence + recommended_next_checks (never definitive causes). Pacing distinguishes flight-date-aware checks (high confidence) from spend/budget fallbacks (lower confidence). Inventory forecast labels `basis: 'historical_delivery'` vs `'true_availability_unknown'` and includes a confidence interval.
+- **Auth + audit scaffolding.** `Authorization: Bearer <token>` per AdCP. Per-tool scope requirements (`analytics:read`, `analytics:forecast`, `analytics:visualize`, `audit:read`, `capabilities:read`) enforced before each call. Every tool invocation produces an audit-log event with `auth_mode`, `tenant_id`, `caller_id`, `params_hash`, `params_keys`, status, warnings count, and duration. Raw revenue rows are never logged.
+- **Two transports.** stdio MCP for Claude Desktop; HTTP MCP for network calls with bearer auth, `.well-known/adagents.json`, `.well-known/brand.json`, and `/healthz`.
+- **In-memory stub backend** for credential-free demos and tests.
 
 ### Discovery for buyers
 
@@ -277,6 +279,53 @@ The agent exposes nine tools over MCP:
 
 ---
 
+## Sample tool response
+
+Every analytics tool returns BOTH `structuredContent` (the validated response object) and `content` (a concise human-readable summary). Example abbreviated `get_morning_briefing` response:
+
+```jsonc
+{
+  "content": [{ "type": "text", "text": "📊 Morning briefing — 2026-05-03 → 2026-05-03\n\n1d window..." }],
+  "structuredContent": {
+    "period": { "start": "2026-05-03", "end": "2026-05-03" },
+    "executive_summary": "1d window ending 2026-05-03: 1,234,567 impressions · $850.00 revenue · $0.69 eCPM (net) · 67.30% fill.",
+    "revenue_and_delivery": {
+      "impressions": 1234567,
+      "revenue_gross": 1100,
+      "revenue_net": 850,
+      "ecpm_net": 0.69,
+      "fill_rate": 0.673,
+      "ctr": 0.004,
+      "top_ad_units": [ /* up to 10, sorted by revenue */ ],
+      "ssp_breakdown": [ /* sorted by revenue */ ]
+    },
+    "pacing_risks": [],
+    "yield_anomalies": [],
+    "data_quality_caveats": [
+      { "code": "REVENUE_FROM_BUYER_SPEND", "severity": "warning", "message": "..." }
+    ],
+    "recommended_actions": ["Investigate low fill rate; check SSP connectivity and floor prices."],
+    "generated_at": "2026-05-04T00:00:00.000Z"
+  }
+}
+```
+
+The full response shape lives in `src/extension/schemas.ts` as `morningBriefingResponseSchema`. Same pattern applies to all analytics tools.
+
+## Data model
+
+`DeliveryRow` (in `src/adcp/types.ts`) is the canonical row shape passed between backends and tools. Highlights:
+
+- **Volume:** `ad_requests`, `matched_requests`, `unfilled_requests`, `bid_requests`, `bid_responses`, `impressions`, `viewable_impressions`, `clicks`.
+- **Revenue (explicit semantics):** `revenue_gross`, `revenue_net`, `buyer_spend`, plus matching `ecpm_gross`, `ecpm_net`. All nullable.
+- **Rates:** `fill_rate`, `match_rate`, `viewability_rate`, `win_rate`, `bid_rate`, `timeout_rate`. Range `[0, 1]` or null.
+- **Identifiers/dimensions:** `bidder`, `ssp`, `deal_id`, `order_id`, `line_item_id`, `ad_unit`, `placement`, `format`, `device`, `geo`, `content_category`, `demand_channel`.
+- **Pricing:** `floor_price`.
+- **Compliance:** `consent_status`, `identity_present`, `creative_status`.
+- **Origin:** `source_system`, `data_freshness_timestamp`, `warnings: DataQualityWarning[]`, `provenance`.
+
+Backends should populate the fields they have, set unavailable fields to `null`, and emit a `DataQualityWarning` per unavailable category. Tools handle nulls; they degrade in precision but never fabricate values.
+
 ## Public API
 
 ```ts
@@ -332,12 +381,36 @@ Want yours listed? Open a PR.
 
 ---
 
+## What this does NOT do
+
+- **Not a ratified AdCP analytics implementation.** Capabilities declare zero `supported_protocols` and zero `specialisms`. The analytics surface is a vendor extension only.
+- **Not a guaranteed availability forecaster.** `get_inventory_forecast` projects from delivery history. For true availability use your ad-server's native forecasting API.
+- **Not a multi-tenant production server.** The HTTP server runs single-tenant: a bearer token grants the configured scope set. Multi-tenant deployments must layer their own bearer→tenant+scope mapping above this.
+- **Not a publisher revenue source-of-truth.** When the backend exposes only buyer-side spend (e.g. AdCP buyer client), revenue is reported as `buyer_spend` and the legacy `revenue` field is annotated with a `REVENUE_FROM_BUYER_SPEND` warning. Don't book financial reports off these numbers.
+- **Not a replacement for storyboard testing.** The extension hasn't been through formal AdCP conformance testing; conformance is by review only.
+
+## Production hardening checklist
+
+Before pointing this at real publisher revenue data:
+
+- [ ] Run TLS termination in front of the HTTP server.
+- [ ] Generate a strong bearer token; rotate quarterly.
+- [ ] If multi-tenant, layer your own bearer→tenant mapping; the reference impl is single-tenant.
+- [ ] Implement a `DataClient` against your ad server; do **not** ship the stub to production.
+- [ ] Set `bearerScopes` to the minimum your callers need (avoid `ALL_SCOPES`).
+- [ ] Wire `setAuditSink()` to a real log pipeline; the default stderr sink + ring buffer is for development.
+- [ ] Add request-rate limiting at the proxy/load-balancer layer (this server has none).
+- [ ] Pin the `publisher-analytics-agent` version in your lockfile; the schema is pre-1.0.
+- [ ] Confirm your `DataClient` impl marks unknown fields as `null` (not `0`) and emits warnings — silent zeros corrupt downstream analysis.
+- [ ] Configure `wellKnownAdagents` and `wellKnownBrand` JSON for AdCP discovery.
+
 ## Development
 
 ```bash
 pnpm install
 pnpm build           # compiles src/ + examples/ to dist/
 pnpm typecheck
+pnpm test            # vitest run — schema validation, mapping, anomaly/pacing/briefing/auth tests
 pnpm example:stdio   # run the stub backend over stdio
 pnpm example:http    # run the stub backend over HTTP (port 7000)
 ```

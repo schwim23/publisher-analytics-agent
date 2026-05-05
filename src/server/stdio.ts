@@ -5,6 +5,7 @@ import type { DataClient } from '../data-client.js';
 import { tools, handleToolCall } from '../tools/index.js';
 import { toErrorEnvelope } from '../adcp/error-envelope.js';
 import type { CapabilitiesContext } from '../adcp/capabilities.js';
+import { DEV_BYPASS_CONTEXT } from '../extension/auth.js';
 
 export interface StdioServerOptions {
   dataClient: DataClient;
@@ -30,7 +31,10 @@ export async function startStdioServer(opts: StdioServerOptions): Promise<void> 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     try {
-      return await handleToolCall(opts.dataClient, capabilitiesContext, name, args as Record<string, unknown>);
+      // Stdio mode runs as `dev-bypass` — appropriate for Claude Desktop / local
+      // dev where the binary itself is the trust boundary. The audit log records
+      // `auth_mode: dev-bypass` so the gap is visible.
+      return await handleToolCall(opts.dataClient, capabilitiesContext, DEV_BYPASS_CONTEXT, name, args as Record<string, unknown>);
     } catch (err) {
       const env = toErrorEnvelope(err);
       return {

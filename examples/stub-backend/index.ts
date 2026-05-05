@@ -58,24 +58,68 @@ const stubClient: DataClient = {
       const tails = combinations(rest);
       return (dimSets[head] ?? ['']).flatMap((v) => tails.map((t) => ({ ...t, [head]: v })));
     }
+    const fetchedAt = new Date().toISOString();
     for (const combo of combinations(query.dimensions)) {
       const seed = JSON.stringify(combo);
       const impressions = Math.floor(pseudo(seed) * 50_000) + 1_000;
       const ctr = 0.005 + pseudo(seed + 'ctr') * 0.02;
-      const ecpm = 1 + pseudo(seed + 'ecpm') * 8;
+      const ecpmGross = 1 + pseudo(seed + 'ecpm') * 8;
+      const revShare = 0.7 + pseudo(seed + 'rev') * 0.15; // 70-85% net to publisher
+      const ecpmNet = ecpmGross * revShare;
       const fillRate = 0.6 + pseudo(seed + 'fill') * 0.35;
-      const totalRequests = Math.floor(impressions / fillRate);
+      const matchRate = fillRate + (1 - fillRate) * (0.5 + pseudo(seed + 'match') * 0.4);
+      const adRequests = Math.floor(impressions / fillRate);
+      const matchedRequests = Math.floor(adRequests * matchRate);
+      const unfilledRequests = Math.max(0, adRequests - impressions);
       const clicks = Math.floor(impressions * ctr);
-      const revenue = (impressions / 1000) * ecpm;
+      const viewabilityRate = 0.5 + pseudo(seed + 'view') * 0.4;
+      const revenueGross = (impressions / 1000) * ecpmGross;
+      const revenueNet = (impressions / 1000) * ecpmNet;
+      const bidRequests = Math.floor(adRequests * (0.6 + pseudo(seed + 'bidreq') * 0.3));
+      const bidRate = 0.7 + pseudo(seed + 'bidrate') * 0.25;
+      const bidResponses = Math.floor(bidRequests * bidRate);
+      const winRate = 0.1 + pseudo(seed + 'win') * 0.3;
+      const timeoutRate = pseudo(seed + 'tmout') * 0.05;
+      const floorPrice = 0.3 + pseudo(seed + 'floor') * 1.5;
       rows.push({
         dimensions: combo,
         impressions,
         clicks,
-        revenue,
-        ecpm,
+        revenue: revenueNet,
+        ecpm: ecpmNet,
         ctr: ctr * 100,
-        totalRequests,
+        totalRequests: adRequests,
         fillRate,
+        ad_requests: adRequests,
+        matched_requests: matchedRequests,
+        unfilled_requests: unfilledRequests,
+        bid_requests: bidRequests,
+        bid_responses: bidResponses,
+        viewable_impressions: Math.floor(impressions * viewabilityRate),
+        revenue_gross: revenueGross,
+        revenue_net: revenueNet,
+        buyer_spend: revenueGross,
+        ecpm_gross: ecpmGross,
+        ecpm_net: ecpmNet,
+        fill_rate: fillRate,
+        match_rate: matchRate,
+        viewability_rate: viewabilityRate,
+        win_rate: winRate,
+        bid_rate: bidRate,
+        timeout_rate: timeoutRate,
+        floor_price: floorPrice,
+        ssp: combo['ssp'] ?? null,
+        ad_unit: combo['ad_unit'] ?? null,
+        device: combo['device'] ?? null,
+        geo: combo['country'] ?? null,
+        order_id: combo['order'] ?? null,
+        line_item_id: combo['line_item'] ?? null,
+        consent_status: pseudo(seed + 'consent') > 0.2 ? 'granted' : 'absent',
+        identity_present: pseudo(seed + 'id') > 0.4,
+        creative_status: 'ok',
+        source_system: 'stub',
+        data_freshness_timestamp: fetchedAt,
+        warnings: [],
       });
     }
     return rows;

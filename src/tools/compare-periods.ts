@@ -1,18 +1,17 @@
-import { z } from 'zod';
 import type { DataClient, DeliveryDimension } from '../data-client.js';
+import {
+  comparePeriodsRequestSchema,
+  comparePeriodsResponseSchema,
+  type ComparePeriodsRequest,
+} from '../extension/schemas.js';
+import { rowRevenue, rowFillRate, pctChange, sumOptional } from '../extension/metric-helpers.js';
+import { structured, fmtNum, fmtPct } from '../extension/tool-result.js';
 
-export const comparePeriodsSchema = z.object({
-  metric: z.enum(['impressions', 'revenue', 'ecpm', 'ctr', 'fill_rate'])
-    .describe('Metric to compare'),
-  periodA: z.object({ start: z.string(), end: z.string() }).describe('First period (e.g. last week)'),
-  periodB: z.object({ start: z.string(), end: z.string() }).describe('Second period (e.g. this week)'),
-  dimension: z.enum(['ad_unit', 'ssp', 'order', 'line_item', 'device', 'country']).optional()
-    .describe('Optional: break the comparison down by this dimension'),
-});
+export const comparePeriodsSchema = comparePeriodsRequestSchema;
 
 export const comparePeriodsTool = {
   name: 'compare_periods',
-  description: 'Compare a metric between two time periods, optionally broken down by dimension. Use for WoW, MoM, or YoY analysis. Supports eCPM, fill rate, revenue, impressions, CTR.',
+  description: 'Compare a single metric between two date ranges, optionally broken down by a dimension. Use for WoW, MoM, YoY, or any custom comparison. Handles missing data with null + warnings instead of fabricating zeros.',
   inputSchema: {
     type: 'object' as const,
     required: ['metric', 'periodA', 'periodB'],
@@ -20,91 +19,137 @@ export const comparePeriodsTool = {
       metric: { type: 'string', enum: ['impressions', 'revenue', 'ecpm', 'ctr', 'fill_rate'] },
       periodA: { type: 'object', properties: { start: { type: 'string' }, end: { type: 'string' } }, required: ['start', 'end'] },
       periodB: { type: 'object', properties: { start: { type: 'string' }, end: { type: 'string' } }, required: ['start', 'end'] },
-      dimension: { type: 'string', enum: ['ad_unit', 'ssp', 'order', 'line_item', 'device', 'country'] },
+      dimension: { type: 'string' },
     },
   },
 };
 
-function extractMetric(row: { impressions: number; revenue: number; ecpm: number; ctr: number; fillRate: number }, metric: string): number {
+function metricForRow(metric: string, r: Parameters<typeof rowRevenue>[0]): number | null {
   switch (metric) {
-    case 'impressions': return row.impressions;
-    case 'revenue': return row.revenue;
-    case 'ecpm': return row.ecpm;
-    case 'ctr': return row.ctr;
-    case 'fill_rate': return row.fillRate;
-    default: return 0;
+    case 'impressions': return r.impressions ?? null;
+    case 'revenue': return rowRevenue(r).value;
+    case 'ecpm': {
+      const rev = rowRevenue(r).value;
+      return rev !== null && r.impressions ? (rev / r.impressions) * 1000 : null;
+    }
+    case 'ctr':
+      return r.impressions && r.impressions > 0 && r.clicks !== null && r.clicks !== undefined
+        ? r.clicks / r.impressions
+        : null;
+    case 'fill_rate': return rowFillRate(r);
+    default: return null;
   }
 }
 
-export async function handleComparePeriods(client: DataClient, args: z.infer<typeof comparePeriodsSchema>) {
-  const dimensions: DeliveryDimension[] = args.dimension ? [args.dimension as DeliveryDimension] : [];
+export async function handleComparePeriods(client: DataClient, args: ComparePeriodsRequest) {
+  const dims: DeliveryDimension[] = args.dimension ? [args.dimension as DeliveryDimension] : [];
 
   const [rowsA, rowsB] = await Promise.all([
-    client.getDeliveryReport({ startDate: args.periodA.start, endDate: args.periodA.end, dimensions }),
-    client.getDeliveryReport({ startDate: args.periodB.start, endDate: args.periodB.end, dimensions }),
+    client.getDeliveryReport({ startDate: args.periodA.start, endDate: args.periodA.end, dimensions: dims }),
+    client.getDeliveryReport({ startDate: args.periodB.start, endDate: args.periodB.end, dimensions: dims }),
   ]);
 
   if (!args.dimension) {
-    const sumMetric = (rows: typeof rowsA) => {
-      if (['ecpm', 'ctr', 'fill_rate'].includes(args.metric)) {
-        const totals = rows.reduce((acc, r) => ({ imp: acc.imp + r.impressions, rev: acc.rev + r.revenue, clicks: acc.clicks + r.clicks, req: acc.req + r.totalRequests }), { imp: 0, rev: 0, clicks: 0, req: 0 });
-        if (args.metric === 'ecpm') return totals.imp > 0 ? (totals.rev / totals.imp) * 1000 : 0;
-        if (args.metric === 'ctr') return totals.imp > 0 ? (totals.clicks / totals.imp) * 100 : 0;
-        if (args.metric === 'fill_rate') return totals.req > 0 ? totals.imp / totals.req : 0;
-      }
-      return rows.reduce((s, r) => s + extractMetric(r, args.metric), 0);
-    };
-
-    const valA = sumMetric(rowsA);
-    const valB = sumMetric(rowsB);
-    const delta = valB - valA;
-    const deltaPercent = valA !== 0 ? (delta / valA) * 100 : 0;
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          metric: args.metric,
-          periodA: { ...args.periodA, value: Math.round(valA * 100) / 100 },
-          periodB: { ...args.periodB, value: Math.round(valB * 100) / 100 },
-          delta: Math.round(delta * 100) / 100,
-          deltaPercent: Math.round(deltaPercent * 10) / 10,
-          trend: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
-        }, null, 2),
-      }],
-    };
+    const valA = aggregateMetric(rowsA, args.metric);
+    const valB = aggregateMetric(rowsB, args.metric);
+    const delta = valA !== null && valB !== null ? valB - valA : null;
+    const deltaPercent = pctChange(valA, valB);
+    return structured({
+      schema: comparePeriodsResponseSchema,
+      data: {
+        metric: args.metric,
+        dimension: null,
+        period_a: { ...args.periodA, value: valA },
+        period_b: { ...args.periodB, value: valB },
+        delta,
+        delta_percent: deltaPercent,
+        trend: trend(delta),
+        rows: [],
+        warnings: [],
+        generated_at: new Date().toISOString(),
+      },
+      text: (parsed) => [
+        `Compare ${parsed.metric}: ${args.periodA.start}→${args.periodA.end} vs ${args.periodB.start}→${args.periodB.end}`,
+        `  A: ${fmtMetric(args.metric, parsed.period_a.value)}  B: ${fmtMetric(args.metric, parsed.period_b.value)}  Δ ${fmtPct(parsed.delta_percent)} (${parsed.trend})`,
+      ].join('\n'),
+    });
   }
 
-  const mapA = new Map(rowsA.map((r) => [r.dimensions[args.dimension!] ?? '', r]));
-  const mapB = new Map(rowsB.map((r) => [r.dimensions[args.dimension!] ?? '', r]));
+  // By-dimension comparison
+  const mapA = new Map<string, typeof rowsA[number]>(rowsA.map((r) => [r.dimensions?.[args.dimension!] ?? '', r]));
+  const mapB = new Map<string, typeof rowsB[number]>(rowsB.map((r) => [r.dimensions?.[args.dimension!] ?? '', r]));
   const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
 
   const rows = [...allKeys].map((key) => {
     const a = mapA.get(key);
     const b = mapB.get(key);
-    const valA = a ? extractMetric(a, args.metric) : 0;
-    const valB = b ? extractMetric(b, args.metric) : 0;
-    const delta = valB - valA;
+    const valA = a ? metricForRow(args.metric, a) : null;
+    const valB = b ? metricForRow(args.metric, b) : null;
+    const delta = valA !== null && valB !== null ? valB - valA : null;
+    const deltaPercent = pctChange(valA, valB);
     return {
-      [args.dimension!]: key,
-      periodA: Math.round(valA * 100) / 100,
-      periodB: Math.round(valB * 100) / 100,
-      delta: Math.round(delta * 100) / 100,
-      deltaPercent: valA !== 0 ? Math.round((delta / valA) * 1000) / 10 : null,
-      trend: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
+      dimension_value: key || '(unknown)',
+      period_a: valA,
+      period_b: valB,
+      delta,
+      delta_percent: deltaPercent,
+      trend: trend(delta),
     };
-  }).sort((a, b) => (a.deltaPercent ?? 0) - (b.deltaPercent ?? 0));
+  }).sort((a, b) => (a.delta_percent ?? 0) - (b.delta_percent ?? 0));
 
-  return {
-    content: [{
-      type: 'text',
-      text: JSON.stringify({
-        metric: args.metric,
-        dimension: args.dimension,
-        periodA: args.periodA,
-        periodB: args.periodB,
-        rows,
-      }, null, 2),
-    }],
-  };
+  return structured({
+    schema: comparePeriodsResponseSchema,
+    data: {
+      metric: args.metric,
+      dimension: args.dimension,
+      period_a: { ...args.periodA, value: null },
+      period_b: { ...args.periodB, value: null },
+      delta: null,
+      delta_percent: null,
+      trend: 'unknown',
+      rows,
+      warnings: [],
+      generated_at: new Date().toISOString(),
+    },
+    text: (parsed) => {
+      const top = (parsed.rows ?? []).slice(0, 5);
+      return [
+        `Compare ${parsed.metric} by ${parsed.dimension}: ${args.periodA.start}→${args.periodA.end} vs ${args.periodB.start}→${args.periodB.end}`,
+        ...top.map((r) => `  ${r.dimension_value}: A=${fmtMetric(args.metric, r.period_a)} B=${fmtMetric(args.metric, r.period_b)} Δ ${fmtPct(r.delta_percent)} (${r.trend})`),
+      ].join('\n');
+    },
+  });
+}
+
+function aggregateMetric(rows: Parameters<typeof rowRevenue>[0][], metric: string): number | null {
+  if (metric === 'ecpm') {
+    const totalRev = sumOptional(rows.map((r) => rowRevenue(r).value));
+    const totalImps = sumOptional(rows.map((r) => r.impressions ?? null));
+    return totalRev !== null && totalImps !== null && totalImps > 0 ? (totalRev / totalImps) * 1000 : null;
+  }
+  if (metric === 'ctr') {
+    const totalImps = sumOptional(rows.map((r) => r.impressions ?? null));
+    const totalClicks = sumOptional(rows.map((r) => r.clicks ?? null));
+    return totalImps !== null && totalImps > 0 && totalClicks !== null ? totalClicks / totalImps : null;
+  }
+  if (metric === 'fill_rate') {
+    const totalImps = sumOptional(rows.map((r) => r.impressions ?? null));
+    const totalReqs = sumOptional(rows.map((r) => (r.ad_requests ?? null) ?? (r.totalRequests > 0 ? r.totalRequests : null)));
+    return totalImps !== null && totalReqs !== null && totalReqs > 0 ? totalImps / totalReqs : null;
+  }
+  return sumOptional(rows.map((r) => metricForRow(metric, r)));
+}
+
+function trend(delta: number | null): 'up' | 'down' | 'flat' | 'unknown' {
+  if (delta === null) return 'unknown';
+  if (delta > 0) return 'up';
+  if (delta < 0) return 'down';
+  return 'flat';
+}
+
+function fmtMetric(metric: string, value: number | null): string {
+  if (value === null) return '—';
+  if (metric === 'fill_rate' || metric === 'ctr') return `${(value * 100).toFixed(2)}%`;
+  if (metric === 'ecpm' || metric === 'revenue') return `$${value.toFixed(2)}`;
+  return fmtNum(value);
 }

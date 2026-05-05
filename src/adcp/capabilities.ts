@@ -1,16 +1,24 @@
 /**
  * `getAdcpCapabilities` — required tool for any AdCP-conformant agent.
  *
- * The AdCP 3.0 spec doesn't yet define an `analytics` protocol or a `publisher-analytics`
- * specialism. While a [forthcoming RFC](https://github.com/adcontextprotocol/adcp/issues)
- * debates ratifying the agent type, this agent declares no `supported_protocols` and
- * exposes its analytics surface via the `x-publisher-analytics` vendor extension. The
- * extension is the discovery signal for buyers; declaring a stand-in protocol like
- * `governance` would falsely imply we implement that protocol's tools.
+ * Important framing: this agent does NOT implement any standard AdCP 3.0
+ * specialism. There is no `analytics` protocol or `publisher-analytics`
+ * specialism in the spec yet. The publisher-analytics surface lives entirely
+ * inside the `extensions["x-publisher-analytics"]` vendor block, declared as
+ * `status: "experimental"` so buyers don't mistake it for ratified spec.
  *
- * Visualizations are tracked separately as a consumer-side utility — they're a UI
- * affordance, not part of the AdCP data surface.
+ * The discovery flow for buyers is:
+ *   1. call `get_adcp_capabilities`
+ *   2. check `extensions["x-publisher-analytics"]` is present and non-stale
+ *   3. read its `tools` list (analytics surface) and `client_utilities` list
+ *      (UI helpers like `generate_visualization`)
  */
+
+import {
+  EXTENSION_NAME,
+  EXTENSION_VERSION,
+  EXTENSION_SCHEMA_VERSION,
+} from '../extension/schemas.js';
 
 const RFC_URL = 'https://github.com/adcontextprotocol/adcp/issues';
 
@@ -28,6 +36,14 @@ const CONSUMER_UTILITIES = new Set([
   'generate_visualization',
 ]);
 
+const EXTENSION_LIMITATIONS = [
+  'Pre-spec; not part of any ratified AdCP specialism.',
+  'Tool argument and response schemas may change before 1.0.',
+  'Revenue values mapped from buyer spend are estimates, not publisher-net revenue.',
+  'Backends without ad-request or fill data will return `null` for those metrics; tools degrade gracefully but lose precision.',
+  'No formal storyboard suite exists for this extension yet — conformance is by review only.',
+];
+
 export interface CapabilitiesContext {
   agentId: string;
   agentName: string;
@@ -38,7 +54,7 @@ export interface CapabilitiesContext {
 
 export const capabilitiesTool = {
   name: 'get_adcp_capabilities',
-  description: 'Return this agent\'s AdCP capability envelope: protocol/specialism membership, supported tools, transports, and any vendor extensions. Required for AdCP-conformant agents.',
+  description: 'Return this agent\'s AdCP capability envelope: AdCP version + idempotency, supported protocols and specialisms (none, by design), supported transports, and any vendor extensions. Required for AdCP-conformant agents.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -57,15 +73,20 @@ export function buildCapabilities(ctx: CapabilitiesContext) {
       name: ctx.agentName,
       version: ctx.agentVersion,
     },
+    // No standard AdCP protocols or specialisms — see extension below.
     supported_protocols: [] as string[],
     specialisms: [] as string[],
     extensions: {
-      'x-publisher-analytics': {
-        version: '0.1.0',
+      [EXTENSION_NAME]: {
+        version: EXTENSION_VERSION,
+        schema_version: EXTENSION_SCHEMA_VERSION,
+        status: 'experimental',
         rfc: RFC_URL,
-        description: 'Publisher-side aggregate analytics: yield, pacing, inventory forecast, multi-period comparison, anomaly detection. Pre-spec preview.',
+        description:
+          'Publisher-side aggregate analytics surface — yield, pacing, inventory forecast, multi-period comparison, anomaly detection. NOT an AdCP specialism; this is a vendor extension proposal.',
         tools: tools.filter((n) => ANALYTICS_TOOLS.has(n)),
         client_utilities: tools.filter((n) => CONSUMER_UTILITIES.has(n)),
+        limitations: EXTENSION_LIMITATIONS,
       },
     },
     request_signing: { supported: false },
@@ -74,10 +95,12 @@ export function buildCapabilities(ctx: CapabilitiesContext) {
 }
 
 export function handleGetAdcpCapabilities(ctx: CapabilitiesContext) {
+  const data = buildCapabilities(ctx);
   return {
+    structuredContent: data as unknown as Record<string, unknown>,
     content: [{
-      type: 'text',
-      text: JSON.stringify(buildCapabilities(ctx), null, 2),
+      type: 'text' as const,
+      text: `${ctx.agentName} v${ctx.agentVersion} — AdCP 3.0 envelope, no standard specialisms. Experimental extension '${EXTENSION_NAME}' v${EXTENSION_VERSION} exposes ${data.extensions[EXTENSION_NAME].tools.length} analytics tool(s).`,
     }],
   };
 }

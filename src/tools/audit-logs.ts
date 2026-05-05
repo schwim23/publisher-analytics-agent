@@ -1,17 +1,16 @@
-import { z } from 'zod';
 import type { DataClient } from '../data-client.js';
+import {
+  planAuditLogsRequestSchema,
+  planAuditLogsResponseSchema,
+  type PlanAuditLogsRequest,
+} from '../extension/schemas.js';
+import { structured } from '../extension/tool-result.js';
 
-export const auditLogsSchema = z.object({
-  mediaBuyId: z.string().optional().describe('Filter by campaign/media buy ID'),
-  planId: z.string().optional().describe('Filter by plan ID'),
-  startDate: z.string().optional().describe('Start date (YYYY-MM-DD)'),
-  endDate: z.string().optional().describe('End date (YYYY-MM-DD)'),
-  limit: z.number().int().min(1).max(500).default(100).describe('Max entries to return (default 100)'),
-});
+export const auditLogsSchema = planAuditLogsRequestSchema;
 
 export const auditLogsTool = {
   name: 'get_plan_audit_logs',
-  description: 'Publisher-side audit trail for campaigns or plans — who did what, when, with what outcome. The AdCP backend (when used) maps this to the spec\'s `get_media_buy_artifacts` task. Useful for compliance reporting, debugging delivery issues, and understanding agent decision history. Returns empty for backends that don\'t expose an audit trail (e.g. GAM).',
+  description: 'Publisher-side audit trail for campaigns or plans. The AdCP backend (when used) maps this to the spec\'s `get_media_buy_artifacts` task. Returns empty for backends that don\'t expose an audit trail (e.g. GAM).',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -24,28 +23,40 @@ export const auditLogsTool = {
   },
 };
 
-export async function handleGetPlanAuditLogs(
-  client: DataClient,
-  args: z.infer<typeof auditLogsSchema>
-) {
+export async function handleGetPlanAuditLogs(client: DataClient, args: PlanAuditLogsRequest) {
   const logs = await client.getPlanAuditLogs(args);
 
-  const summary = {
-    total: logs.length,
-    byOutcome: logs.reduce<Record<string, number>>((acc, l) => {
-      acc[l.outcome] = (acc[l.outcome] ?? 0) + 1;
-      return acc;
-    }, {}),
-    byActorType: logs.reduce<Record<string, number>>((acc, l) => {
-      acc[l.actorType] = (acc[l.actorType] ?? 0) + 1;
-      return acc;
-    }, {}),
-  };
+  const byOutcome: Record<string, number> = {};
+  const byActorType: Record<string, number> = {};
+  for (const l of logs) {
+    byOutcome[l.outcome] = (byOutcome[l.outcome] ?? 0) + 1;
+    byActorType[l.actorType] = (byActorType[l.actorType] ?? 0) + 1;
+  }
 
-  return {
-    content: [{
-      type: 'text',
-      text: JSON.stringify({ summary, logs, fetchedAt: new Date().toISOString() }, null, 2),
-    }],
-  };
+  const normalizedLogs = logs.map((l) => ({
+    id: l.id,
+    timestamp: l.timestamp,
+    media_buy_id: l.mediaBuyId ?? null,
+    plan_id: l.planId ?? null,
+    action: l.action,
+    actor: l.actor,
+    actor_type: l.actorType,
+    outcome: l.outcome,
+    details: l.details,
+  }));
+
+  return structured({
+    schema: planAuditLogsResponseSchema,
+    data: {
+      summary: { total: logs.length, by_outcome: byOutcome, by_actor_type: byActorType },
+      logs: normalizedLogs,
+      warnings: [],
+      generated_at: new Date().toISOString(),
+    },
+    text: (parsed) => {
+      if (parsed.summary.total === 0) return 'No audit log entries match the filter.';
+      const outcomes = Object.entries(parsed.summary.by_outcome).map(([o, n]) => `${n} ${o}`).join(', ');
+      return `${parsed.summary.total} audit entries (${outcomes}). Showing logs in structured response.`;
+    },
+  });
 }

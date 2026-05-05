@@ -167,20 +167,86 @@ export class AdCPBuyerClient implements DataClient {
   }
 
   async getDeliveryReport(query: DeliveryQuery): Promise<DeliveryRow[]> {
+    // Important: AdCP `get_media_buy_delivery` returns *buyer-side* delivery data:
+    // impressions delivered to that buy and the buyer's reported spend. This is NOT
+    // a publisher-revenue source — it's a buyer-spend source. We surface it as
+    // `buyer_spend` (and ALSO populate the legacy `revenue` field for backward
+    // compat with existing tools, with a warning that it's buyer-derived).
+    //
+    // Fields we genuinely don't know from this surface are left null:
+    //   - ad_requests, matched_requests, unfilled_requests
+    //   - fill_rate, match_rate
+    //   - publisher revenue_net / revenue_gross
+    // Tools downstream must handle nulls.
     const mediaBuys = await this.listMediaBuys({ status: 'active' });
     const results: DeliveryRow[] = [];
+    const fetchedAt = new Date().toISOString();
     for (const mb of mediaBuys) {
       const reports = await this.getMediaBuyDelivery(mb.id, { start: query.startDate, end: query.endDate });
       for (const r of reports) {
+        const ecpmFromSpend = r.impressions > 0 ? (r.spend / r.impressions) * 1000 : 0;
+        const ctr = r.impressions > 0 ? (r.clicks / r.impressions) : null;
         results.push({
           dimensions: { date: r.date, line_item: mb.name },
+
+          // Legacy fields — kept filled for backward compat. `revenue` here is
+          // BUYER spend, not publisher revenue. Warnings call this out.
           impressions: r.impressions,
           clicks: r.clicks,
           revenue: r.spend,
-          ecpm: r.impressions > 0 ? (r.spend / r.impressions) * 1000 : 0,
-          ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
-          totalRequests: r.impressions,
-          fillRate: 1,
+          ecpm: ecpmFromSpend,
+          ctr: ctr === null ? 0 : ctr * 100,
+          totalRequests: 0,
+          fillRate: 0,
+
+          // Extended fields — explicit null for things we don't actually know.
+          ad_requests: null,
+          matched_requests: null,
+          unfilled_requests: null,
+          buyer_spend: r.spend,
+          revenue_gross: null,
+          revenue_net: null,
+          ecpm_gross: null,
+          ecpm_net: null,
+          fill_rate: null,
+          match_rate: null,
+          line_item_id: mb.id,
+
+          source_system: 'adcp-buyer',
+          data_freshness_timestamp: fetchedAt,
+          warnings: [
+            {
+              code: 'REVENUE_FROM_BUYER_SPEND',
+              message: '`revenue` is the buyer\'s reported spend, not publisher net revenue. Treat as an estimate.',
+              severity: 'warning',
+              affected_field: 'revenue',
+            },
+            {
+              code: 'NET_VS_GROSS_UNKNOWN',
+              message: 'Buyer-side spend has no publisher rev-share applied; net-vs-gross is unknown.',
+              severity: 'warning',
+            },
+            {
+              code: 'TOTAL_REQUESTS_UNAVAILABLE',
+              message: 'AdCP buyer delivery does not report ad requests; legacy `totalRequests` is reported as 0 and `ad_requests` is null.',
+              severity: 'warning',
+              affected_field: 'totalRequests',
+            },
+            {
+              code: 'FILL_RATE_UNAVAILABLE',
+              message: 'AdCP buyer delivery does not report fill rate; legacy `fillRate` is reported as 0 and `fill_rate` is null.',
+              severity: 'warning',
+              affected_field: 'fillRate',
+            },
+          ],
+          provenance: {
+            source_system: 'adcp-buyer',
+            source_task: 'get_media_buy_delivery',
+            source_record_id: mb.id,
+            source_field: 'spend',
+            fetched_at: fetchedAt,
+            derivation: 'buyer.spend mapped to revenue + buyer_spend; ecpm = (spend / impressions) * 1000',
+          },
         });
       }
     }

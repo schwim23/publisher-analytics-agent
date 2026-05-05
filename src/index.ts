@@ -7,6 +7,20 @@ export type {
   DeliveryDimension,
 } from './data-client.js';
 
+// Extension contracts — schemas, auth, audit
+export * from './extension/schemas.js';
+export {
+  ALL_SCOPES, DEV_BYPASS_CONTEXT, ANON_CONTEXT, TOOL_SCOPES, ScopeDeniedError, assertScopes,
+  type AuthContext, type Scope,
+} from './extension/auth.js';
+export {
+  setAuditSink, getRecentAuditEvents, hashParams, withAudit,
+  type AuditEvent, type AuditSink,
+} from './extension/audit.js';
+export {
+  rowRevenue, rowFillRate, rowAdRequests, computeEcpm, pctChange,
+} from './extension/metric-helpers.js';
+
 export type {
   AdCPConfig,
   MediaBuy,

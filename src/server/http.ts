@@ -6,6 +6,7 @@ import type { DataClient } from '../data-client.js';
 import { tools, handleToolCall } from '../tools/index.js';
 import { toErrorEnvelope } from '../adcp/error-envelope.js';
 import type { CapabilitiesContext } from '../adcp/capabilities.js';
+import { ALL_SCOPES, DEV_BYPASS_CONTEXT, type AuthContext, type Scope } from '../extension/auth.js';
 
 export interface HttpServerOptions {
   dataClient: DataClient;
@@ -18,6 +19,16 @@ export interface HttpServerOptions {
   wellKnownAdagents?: unknown;
   /** JSON content for `GET /.well-known/brand.json` (this brand's named agents). */
   wellKnownBrand?: unknown;
+  /**
+   * Scopes granted to authenticated callers. Defaults to ALL_SCOPES when a
+   * bearer token is set (single-tenant mode), or `[]` when no token is set
+   * (in which case the server runs in dev-bypass mode and this field is
+   * ignored). Multi-tenant deployments should compose their own per-token
+   * scope mapping at a layer above this server.
+   */
+  bearerScopes?: ReadonlyArray<Scope>;
+  /** Optional tenant id stamped onto audit-log events for bearer-mode calls. */
+  tenantId?: string;
 }
 
 export interface RunningHttpServer {
@@ -44,10 +55,22 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
+  // Single-tenant bearer-mode AuthContext. The HTTP layer (below) rejects
+  // unauthorized requests with a 401 before they ever reach this handler;
+  // any request that gets here is authenticated. Multi-tenant deployments
+  // should swap this for an AsyncLocalStorage-backed context per request.
+  const bearerAuthContext: AuthContext = {
+    mode: 'bearer',
+    tenant_id: opts.tenantId,
+    caller_id: 'bearer',
+    scopes: opts.bearerScopes ?? ALL_SCOPES,
+  };
+  const activeAuthContext: AuthContext = opts.bearerToken ? bearerAuthContext : DEV_BYPASS_CONTEXT;
+
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     try {
-      return await handleToolCall(opts.dataClient, capabilitiesContext, name, args as Record<string, unknown>);
+      return await handleToolCall(opts.dataClient, capabilitiesContext, activeAuthContext, name, args as Record<string, unknown>);
     } catch (err) {
       const env = toErrorEnvelope(err);
       return {
