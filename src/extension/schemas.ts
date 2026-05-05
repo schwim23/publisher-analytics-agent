@@ -75,6 +75,13 @@ export type ConfidenceLevel = z.infer<typeof confidenceLevelSchema>;
 export const severitySchema = z.enum(['info', 'warning', 'critical']);
 export type Severity = z.infer<typeof severitySchema>;
 
+// Deal-related enums hoisted up so morningBriefingResponseSchema can reference them.
+export const dealTypeSchema = z.enum(['programmatic_guaranteed', 'preferred_deal', 'private_marketplace', 'open_exchange', 'unknown']);
+export type DealType = z.infer<typeof dealTypeSchema>;
+
+export const dealHealthStatusSchema = z.enum(['healthy', 'at_risk', 'critical', 'no_data']);
+export type DealHealthStatus = z.infer<typeof dealHealthStatusSchema>;
+
 /**
  * Provenance captures *where* a value came from. Critical for publisher
  * revenue data because the same `revenue` field can mean very different
@@ -271,6 +278,10 @@ export const morningBriefingRequestSchema = z.object({
   include_inventory_forecast: z.boolean().default(false),
   /** Compose governance/audit-issue summary internally. Backend-dependent; default false. */
   include_governance: z.boolean().default(false),
+  /** Compose top at-risk deal diagnostics. Backend-dependent (requires getDealDiagnosticsData). Default: false. */
+  include_deal_diagnostics: z.boolean().default(false),
+  /** When include_deal_diagnostics is true, restrict to these deal_ids. Omit for all returned. */
+  deal_ids: z.array(z.string()).optional(),
 });
 export type MorningBriefingRequest = z.infer<typeof morningBriefingRequestSchema>;
 
@@ -309,6 +320,14 @@ export const morningBriefingResponseSchema = z.object({
   })).default([]),
   inventory_forecast_highlights: z.array(z.string()).default([]),
   governance_audit_issues: z.array(z.string()).default([]),
+  deal_diagnostics: z.array(z.object({
+    deal_id: z.string(),
+    deal_name: z.string().nullable(),
+    deal_type: dealTypeSchema,
+    health_status: dealHealthStatusSchema,
+    top_issue: z.string().nullable(),
+    severity: severitySchema.nullable(),
+  })).default([]),
   data_quality_caveats: z.array(dataQualityWarningSchema).default([]),
   recommended_actions: z.array(z.string()).default([]),
   generated_at: isoDatetime,
@@ -466,6 +485,191 @@ export const visualizationResponseSchema = z.object({
   })),
 });
 export type VisualizationResponse = z.infer<typeof visualizationResponseSchema>;
+
+/* ─────────────────────────  Deal diagnostics  ──────────────────────────
+ * get_deal_diagnostics is the heaviest-weight tool in the extension. It walks
+ * a deal's auction funnel (ad request → bid request → response → above-floor
+ * → win → impression), computes pacing if a flight is bookable, and emits
+ * rule-based DealDiagnosticIssue entries as **hypotheses** — each with
+ * confidence, evidence, recommended_next_checks, and recommended_actions.
+ * It never claims a definitive cause.
+ */
+
+export const dealIssueCodeSchema = z.enum([
+  'SUPPLY_CONSTRAINT',
+  'LOW_BID_RATE',
+  'FLOOR_MISMATCH',
+  'LOW_WIN_RATE',
+  'CREATIVE_BLOCKED',
+  'UNDERPACING',
+  'ROUTING_OR_SSP_ISSUE',
+  'DATA_INSUFFICIENT',
+]);
+export type DealIssueCode = z.infer<typeof dealIssueCodeSchema>;
+
+export const dealDimensionSchema = z.enum(['ssp', 'format', 'device', 'geo', 'creative', 'date']);
+export type DealDimension = z.infer<typeof dealDimensionSchema>;
+
+export const dealDiagnosticIssueSchema = z.object({
+  code: dealIssueCodeSchema,
+  severity: severitySchema,
+  hypothesis: z.string(),
+  confidence: confidenceLevelSchema,
+  evidence: z.array(z.string()).default([]),
+  recommended_next_checks: z.array(z.string()).default([]),
+  recommended_actions: z.array(z.string()).default([]),
+});
+export type DealDiagnosticIssue = z.infer<typeof dealDiagnosticIssueSchema>;
+
+/**
+ * Auction funnel — six volume stages plus four step-to-step rates. Any stage
+ * may be null when the backend doesn't expose it; rates are null whenever
+ * either of their two stages is null. Tools MUST handle nulls without
+ * computing fake values.
+ */
+export const dealFunnelSchema = z.object({
+  eligible_ad_requests: z.number().nullable(),
+  deal_bid_requests: z.number().nullable(),
+  bid_responses: z.number().nullable(),
+  valid_bids: z.number().nullable(),
+  bids_above_floor: z.number().nullable(),
+  auction_wins: z.number().nullable(),
+  impressions: z.number().nullable(),
+
+  // Step-to-step rates — each in [0,1] or null
+  request_to_response_rate: z.number().min(0).max(1).nullable(),
+  response_to_above_floor_rate: z.number().min(0).max(1).nullable(),
+  above_floor_to_win_rate: z.number().min(0).max(1).nullable(),
+  win_to_impression_rate: z.number().min(0).max(1).nullable(),
+});
+export type DealFunnel = z.infer<typeof dealFunnelSchema>;
+
+export const dealPacingSchema = z.object({
+  pacing_ratio: z.number().nullable().describe('actual_delivery / expected_delivery; 1.0 = on track'),
+  spend_ratio: z.number().nullable(),
+  elapsed_fraction: z.number().min(0).max(1).nullable(),
+  on_track: z.boolean().nullable(),
+  confidence: confidenceLevelSchema,
+  basis: z.enum(['booked_impressions', 'booked_revenue', 'booked_budget', 'unknown']),
+});
+export type DealPacing = z.infer<typeof dealPacingSchema>;
+
+export const dealBreakdownRowSchema = z.object({
+  dimension_value: z.string(),
+  impressions: z.number().nullable(),
+  bid_responses: z.number().nullable(),
+  win_rate: z.number().nullable(),
+  bid_rate: z.number().nullable(),
+  ecpm: z.number().nullable(),
+});
+export const dealBreakdownSchema = z.object({
+  dimension: dealDimensionSchema,
+  rows: z.array(dealBreakdownRowSchema),
+});
+export type DealBreakdown = z.infer<typeof dealBreakdownSchema>;
+
+/**
+ * Per-deal aggregated metrics passed back from `getDealDiagnosticsData`.
+ * All measurement fields are nullable; the source is responsible for
+ * populating only what it actually has and emitting warnings for the rest.
+ */
+export const dealMetricRowSchema = z.object({
+  // Identifiers
+  deal_id: z.string(),
+  deal_name: z.string().nullish(),
+  deal_type: dealTypeSchema.default('unknown'),
+  buyer: z.string().nullish(),
+  dsp: z.string().nullish(),
+  seat_id: z.string().nullish(),
+  ssp: z.string().nullish(),
+  exchange: z.string().nullish(),
+
+  // Booked envelope (any null → pacing is downgraded)
+  booked_impressions: z.number().nullish(),
+  booked_revenue: z.number().nullish(),
+  booked_budget: z.number().nullish(),
+  start_date: dateString.nullish(),
+  end_date: dateString.nullish(),
+  timezone: z.string().nullish(),
+
+  // Funnel volumes
+  eligible_ad_requests: z.number().nullish(),
+  deal_bid_requests: z.number().nullish(),
+  bid_responses: z.number().nullish(),
+  valid_bids: z.number().nullish(),
+  bids_above_floor: z.number().nullish(),
+  auction_wins: z.number().nullish(),
+  impressions: z.number().nullish(),
+  clicks: z.number().nullish(),
+
+  // Money
+  buyer_spend: z.number().nullish(),
+  revenue_gross: z.number().nullish(),
+  revenue_net: z.number().nullish(),
+
+  // Pricing
+  floor_price: z.number().nullish(),
+  avg_bid_cpm: z.number().nullish(),
+  clearing_cpm: z.number().nullish(),
+  deal_cpm: z.number().nullish(),
+
+  // Pre-computed rates (optional; tool will derive from volumes if absent)
+  bid_rate: z.number().min(0).max(1).nullish(),
+  win_rate: z.number().min(0).max(1).nullish(),
+  above_floor_rate: z.number().min(0).max(1).nullish(),
+  timeout_rate: z.number().min(0).max(1).nullish(),
+  no_bid_rate: z.number().min(0).max(1).nullish(),
+
+  // Operational status
+  creative_status: z.string().nullish().describe('e.g. "approved", "rejected", "pending", "blocked_by_buyer"'),
+  targeting_status: z.string().nullish(),
+  buyer_status: z.string().nullish(),
+
+  // Origin
+  source_system: z.string().nullish(),
+  data_freshness_timestamp: isoDatetime.nullish(),
+  warnings: z.array(dataQualityWarningSchema).default([]),
+  provenance: provenanceSchema.optional(),
+
+  // Optional dimension breakdowns — primarily for diagnostics that look at
+  // SSP / creative / format skews. Tool does not require these.
+  breakdowns: z.array(dealBreakdownSchema).default([]),
+});
+export type DealMetricRow = z.infer<typeof dealMetricRowSchema>;
+
+export const dealDiagnosticsRequestSchema = z.object({
+  deal_ids: z.array(z.string()).optional().describe('Filter to these deals; if omitted, diagnostics run on all active deals the backend returns.'),
+  date_range: dateRangeSchema.optional().describe('Defaults to the last 7 days ending yesterday.'),
+  include_breakdown: z.boolean().default(false),
+  min_severity: severitySchema.default('info'),
+});
+export type DealDiagnosticsRequest = z.infer<typeof dealDiagnosticsRequestSchema>;
+
+export const dealDiagnosticsEntrySchema = z.object({
+  deal_id: z.string(),
+  deal_name: z.string().nullable(),
+  deal_type: dealTypeSchema,
+  buyer: z.string().nullable(),
+  ssp: z.string().nullable(),
+  period: dateRangeSchema,
+  health_status: dealHealthStatusSchema,
+  funnel: dealFunnelSchema,
+  pacing: dealPacingSchema.nullable(),
+  issues: z.array(dealDiagnosticIssueSchema),
+  warnings: z.array(dataQualityWarningSchema).default([]),
+  breakdowns: z.array(dealBreakdownSchema).default([]),
+  provenance: provenanceSchema.optional(),
+});
+export type DealDiagnosticsEntry = z.infer<typeof dealDiagnosticsEntrySchema>;
+
+export const dealDiagnosticsResponseSchema = z.object({
+  period: dateRangeSchema,
+  deals: z.array(dealDiagnosticsEntrySchema),
+  total: z.number().int().nonnegative(),
+  warnings: z.array(dataQualityWarningSchema).default([]),
+  generated_at: isoDatetime,
+});
+export type DealDiagnosticsResponse = z.infer<typeof dealDiagnosticsResponseSchema>;
 
 // get_plan_audit_logs
 export const planAuditLogsRequestSchema = z.object({

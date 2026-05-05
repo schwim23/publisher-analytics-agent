@@ -152,6 +152,66 @@ Publisher-side audit trail. On AdCP-backend deployments maps to the spec's
 **Request:** `{ mediaBuyId?, planId?, startDate?, endDate?, limit }`
 **Response:** summary + log entries.
 
+### `get_deal_diagnostics`
+
+Diagnose deal health across pacing, supply availability, bid response behavior, floor/bid mismatch, auction win rate, creative status, and SSP routing. Walks the deal auction funnel and emits issues as **hypotheses** (NOT verdicts) with confidence, evidence, recommended next checks, and recommended actions.
+
+**Relationship to AdCP `get_media_buy_delivery`.** The spec's `get_media_buy_delivery` returns post-auction delivery (impressions, clicks, spend, pacing) for a single media buy. `get_deal_diagnostics` is **publisher-side** and **upstream**: it joins the buyer's media-buy-side delivery with the publisher's auction-funnel data (eligible requests, bid requests, responses, above-floor bids, wins) to diagnose *why* a deal underperforms — something the buyer-facing AdCP task can't do alone.
+
+**Request:** `DealDiagnosticsRequest`
+- `deal_ids?: string[]` — filter to specific deals
+- `date_range?: DateRange` — defaults to last 7 days ending yesterday
+- `include_breakdown?: boolean` — include per-dimension breakdowns (default false)
+- `min_severity?: 'info' | 'warning' | 'critical'` — filter issues by severity (default `info`)
+
+**Response:** `DealDiagnosticsResponse` — array of `DealDiagnosticsEntry`, each containing:
+- Identity: `deal_id`, `deal_name`, `deal_type`, `buyer`, `ssp`
+- `period`: the analysis window
+- `funnel: DealFunnel` — six volume stages plus four step-to-step rates, all nullable
+- `pacing: DealPacing | null` — `pacing_ratio`, `spend_ratio`, `elapsed_fraction`, `on_track`, `confidence`, `basis` (`booked_impressions` | `booked_revenue` | `booked_budget` | `unknown`)
+- `health_status`: `healthy` | `at_risk` | `critical` | `no_data`
+- `issues: DealDiagnosticIssue[]` — see issue codes below
+- `warnings: DataQualityWarning[]`
+- `breakdowns?: DealBreakdown[]` — when requested
+- `provenance?: Provenance`
+
+#### Diagnostic issue codes
+
+| Code | When emitted | Severity ladder |
+|---|---|---|
+| `SUPPLY_CONSTRAINT` | Eligible ad requests are zero, or far below booked impressions | zero → critical, low → warning |
+| `LOW_BID_RATE` | `bid_responses / deal_bid_requests` < 0.3 with sample size > 100 | <0.1 critical, <0.3 warning |
+| `FLOOR_MISMATCH` | `floor_price > 1.05 × avg_bid_cpm` | low above-floor rate → critical |
+| `LOW_WIN_RATE` | `above_floor_to_win` < 0.3 with sample size > 50 | <0.1 critical, <0.3 warning |
+| `CREATIVE_BLOCKED` | `creative_status` is rejected/blocked/disapproved | critical |
+| `UNDERPACING` | `pacing_ratio` below threshold given flight progress | <0.5 critical, <0.85 warning |
+| `ROUTING_OR_SSP_ISSUE` | `deal_bid_requests / eligible_ad_requests` < 0.1 | warning |
+| `DATA_INSUFFICIENT` | Critical funnel fields missing (eligible_ad_requests, deal_bid_requests, or bid_responses null) | info — never causes a critical health status by itself |
+
+#### Required vs optional data fields
+
+`DealMetricRow` fields the diagnostic engine USES:
+
+**Strongly recommended** — populate at minimum these or you'll mostly get `DATA_INSUFFICIENT`:
+- `deal_id`, `deal_type`
+- `eligible_ad_requests`, `deal_bid_requests`, `bid_responses`
+- `bids_above_floor`, `auction_wins`, `impressions`
+- `floor_price`, `avg_bid_cpm`
+- `creative_status`
+
+**For pacing diagnostics** (any one is enough for a basis):
+- `booked_impressions` + `start_date` + `end_date`
+- `booked_revenue` + `revenue_net` (or `revenue_gross` or `buyer_spend`) + flight dates
+- `booked_budget` + `buyer_spend`
+
+**Identity (non-functional but improves UX):**
+- `deal_name`, `buyer`, `dsp`, `seat_id`, `ssp`, `exchange`
+
+**Compliance / context:**
+- `targeting_status`, `buyer_status`
+
+All fields not listed above are accepted but not consumed by current diagnostic rules. Backends should populate whatever they have; missing values become `null` and the engine degrades gracefully via warnings.
+
 ### `generate_visualization` (client utility, not AdCP surface)
 
 Turn a tool result into a chart spec for UI rendering.

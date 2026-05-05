@@ -1,4 +1,5 @@
 import type { MediaBuy, DeliveryReport, GovernanceResult, InventoryProduct, AuditLogEntry, DeliveryRow } from './adcp/types.js';
+import type { DealMetricRow } from './extension/schemas.js';
 
 export type DeliveryDimension = 'date' | 'ad_unit' | 'order' | 'line_item' | 'device' | 'country' | 'ssp';
 
@@ -45,4 +46,16 @@ export interface DataClient {
   getAllDeliveryReports(dateRange?: { start: string; end: string }): Promise<{ mediaBuy: MediaBuy; reports: DeliveryReport[] }[]>;
   /** Optional: warm a backend-side cache for the given date range. Backends with slow report jobs (e.g. GAM) implement this; in-memory or fast-API backends can omit it. */
   refreshDeliveryCache?(dateRange: { start: string; end: string }): Promise<void>;
+
+  /**
+   * Optional: aggregated per-deal metrics for the deal diagnostics tool.
+   * Returns one row per deal_id over the requested period.
+   *
+   * Backends without per-deal funnel data SHOULD implement this and populate
+   * what they can — the tool degrades gracefully via DATA_INSUFFICIENT
+   * warnings rather than fabricating values. Backends that have no deal
+   * concept at all can omit this method entirely; the tool will emit a
+   * single DATA_INSUFFICIENT response.
+   */
+  getDealDiagnosticsData?(request: { dealIds?: string[]; startDate: string; endDate: string }): Promise<DealMetricRow[]>;
 }

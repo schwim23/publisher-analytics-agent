@@ -15,6 +15,7 @@ import type {
   GovernanceResult,
   InventoryProduct,
   AuditLogEntry,
+  DealMetricRow,
 } from '../../src/index.js';
 import { createPublisherAnalyticsServer } from '../../src/index.js';
 
@@ -180,7 +181,189 @@ const stubClient: DataClient = {
     const buys = await this.listMediaBuys();
     return Promise.all(buys.map(async (mb) => ({ mediaBuy: mb, reports: await this.getMediaBuyDelivery(mb.id, dateRange) })));
   },
+
+  async getDealDiagnosticsData(req: { dealIds?: string[]; startDate: string; endDate: string }): Promise<DealMetricRow[]> {
+    const fixtures = STUB_DEAL_FIXTURES.map((f) => ({
+      ...f,
+      data_freshness_timestamp: new Date().toISOString(),
+      source_system: 'stub',
+    }));
+    if (req.dealIds && req.dealIds.length > 0) {
+      return fixtures.filter((d) => req.dealIds!.includes(d.deal_id));
+    }
+    return fixtures;
+  },
 };
+
+/**
+ * Five fixture deals chosen to exercise each diagnostic rule:
+ *   1. healthy_pg_001         — healthy PG, no issues, on-track
+ *   2. underpacing_supply_002 — underpacing because eligible supply is low
+ *   3. low_bid_pmp_003        — PMP with low bid response rate
+ *   4. floor_mismatch_004     — floor priced above the bid distribution
+ *   5. creative_blocked_005   — creative rejected, deal effectively dead
+ */
+const STUB_DEAL_FIXTURES: DealMetricRow[] = [
+  {
+    deal_id: 'healthy_pg_001',
+    deal_name: 'Acme Q2 PG — Homepage',
+    deal_type: 'programmatic_guaranteed',
+    buyer: 'Acme Media',
+    dsp: 'TheTradeDesk',
+    seat_id: 'ttd-12345',
+    ssp: 'magnite',
+    booked_impressions: 700_000,
+    booked_revenue: 7_000,
+    start_date: dateOffset(-10),
+    end_date: dateOffset(20),
+    eligible_ad_requests: 1_000_000,
+    deal_bid_requests: 950_000,
+    bid_responses: 720_000,
+    valid_bids: 715_000,
+    bids_above_floor: 700_000,
+    auction_wins: 250_000,
+    impressions: 250_000,
+    clicks: 1_200,
+    buyer_spend: 2_500,
+    revenue_net: 2_400,
+    floor_price: 8,
+    avg_bid_cpm: 12,
+    deal_cpm: 10,
+    creative_status: 'approved',
+    targeting_status: 'ok',
+    buyer_status: 'active',
+    warnings: [],
+    breakdowns: [],
+  },
+  {
+    deal_id: 'underpacing_supply_002',
+    deal_name: 'Beta CTV — Sports Verticals',
+    deal_type: 'preferred_deal',
+    buyer: 'Beta Media',
+    dsp: 'DV360',
+    ssp: 'magnite',
+    booked_impressions: 500_000,
+    booked_revenue: 6_000,
+    start_date: dateOffset(-15),
+    end_date: dateOffset(15),
+    // Supply starvation: eligible_ad_requests is far below booked target
+    eligible_ad_requests: 80_000,
+    deal_bid_requests: 75_000,
+    bid_responses: 60_000,
+    valid_bids: 55_000,
+    bids_above_floor: 50_000,
+    auction_wins: 35_000,
+    impressions: 35_000,
+    clicks: 100,
+    buyer_spend: 350,
+    revenue_net: 350,
+    floor_price: 9,
+    avg_bid_cpm: 11,
+    deal_cpm: 12,
+    creative_status: 'approved',
+    targeting_status: 'ok',
+    buyer_status: 'active',
+    warnings: [],
+    breakdowns: [],
+  },
+  {
+    deal_id: 'low_bid_pmp_003',
+    deal_name: 'Gamma PMP — Article Premium',
+    deal_type: 'private_marketplace',
+    buyer: 'Gamma Media',
+    dsp: 'Xandr',
+    ssp: 'pubmatic',
+    booked_impressions: 200_000,
+    booked_revenue: 1_400,
+    start_date: dateOffset(-5),
+    end_date: dateOffset(25),
+    eligible_ad_requests: 800_000,
+    deal_bid_requests: 800_000,
+    // Buyer rarely responds — < 10%
+    bid_responses: 60_000,
+    valid_bids: 55_000,
+    bids_above_floor: 40_000,
+    auction_wins: 12_000,
+    impressions: 12_000,
+    clicks: 50,
+    buyer_spend: 80,
+    revenue_net: 75,
+    floor_price: 5,
+    avg_bid_cpm: 7,
+    deal_cpm: 6,
+    creative_status: 'approved',
+    targeting_status: 'ok',
+    buyer_status: 'active',
+    warnings: [],
+    breakdowns: [],
+  },
+  {
+    deal_id: 'floor_mismatch_004',
+    deal_name: 'Delta PMP — Sports Display',
+    deal_type: 'private_marketplace',
+    buyer: 'Delta Brands',
+    dsp: 'TheTradeDesk',
+    ssp: 'index',
+    booked_impressions: 300_000,
+    booked_revenue: 4_500,
+    start_date: dateOffset(-7),
+    end_date: dateOffset(23),
+    eligible_ad_requests: 600_000,
+    deal_bid_requests: 580_000,
+    bid_responses: 400_000,
+    valid_bids: 380_000,
+    // Floor is way above bid distribution → almost nothing clears
+    bids_above_floor: 20_000,
+    auction_wins: 8_000,
+    impressions: 8_000,
+    clicks: 30,
+    buyer_spend: 90,
+    revenue_net: 80,
+    floor_price: 15,
+    avg_bid_cpm: 6,
+    deal_cpm: 14,
+    creative_status: 'approved',
+    targeting_status: 'ok',
+    buyer_status: 'active',
+    warnings: [],
+    breakdowns: [],
+  },
+  {
+    deal_id: 'creative_blocked_005',
+    deal_name: 'Epsilon — Run-of-Network',
+    deal_type: 'preferred_deal',
+    buyer: 'Epsilon Brands',
+    dsp: 'DV360',
+    ssp: 'google_adx',
+    booked_impressions: 150_000,
+    booked_revenue: 2_000,
+    start_date: dateOffset(-3),
+    end_date: dateOffset(27),
+    eligible_ad_requests: 500_000,
+    deal_bid_requests: 480_000,
+    bid_responses: 350_000,
+    valid_bids: 340_000,
+    bids_above_floor: 320_000,
+    auction_wins: 0,
+    impressions: 0,
+    clicks: 0,
+    buyer_spend: 0,
+    revenue_net: 0,
+    floor_price: 4,
+    avg_bid_cpm: 8,
+    deal_cpm: 7,
+    creative_status: 'rejected',
+    targeting_status: 'ok',
+    buyer_status: 'active',
+    warnings: [],
+    breakdowns: [],
+  },
+];
+
+function dateOffset(days: number): string {
+  const d = new Date(); d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split('T')[0];
+}
 
 const transport = (process.env.ADAM_TRANSPORT ?? 'stdio') as 'stdio' | 'http';
 const agent = { id: 'publisher-analytics-stub', name: 'Stub Publisher Analytics Agent', version: '0.1.0' };

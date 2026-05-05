@@ -334,6 +334,7 @@ The agent exposes nine tools over MCP:
 | `get_inventory_forecast` | Project available impressions for an ad unit over a future range. |
 | `compare_periods` | WoW / MoM / YoY / custom-range comparisons. |
 | `get_plan_audit_logs` | Publisher-side audit trail. The AdCP backend (when used) maps this to the spec's `get_media_buy_artifacts` task. Returns empty for backends that don't expose an audit trail (e.g. GAM). |
+| `get_deal_diagnostics` | Walk a deal's auction funnel + pacing and emit hypotheses for SUPPLY_CONSTRAINT, LOW_BID_RATE, FLOOR_MISMATCH, LOW_WIN_RATE, CREATIVE_BLOCKED, UNDERPACING, ROUTING_OR_SSP_ISSUE. Each hypothesis carries confidence + evidence + recommended next checks + recommended actions. Backends without per-deal funnel data emit `DATA_INSUFFICIENT` — never fabricated metrics. |
 | `generate_visualization` | Turn a tool result into a chart spec (line / bar / area / pie). |
 | `get_adcp_capabilities` | AdCP capability envelope: protocol, specialisms, extensions, supported transports. |
 
@@ -371,6 +372,59 @@ Every analytics tool returns BOTH `structuredContent` (the validated response ob
 ```
 
 The full response shape lives in `src/extension/schemas.ts` as `morningBriefingResponseSchema`. Same pattern applies to all analytics tools.
+
+**`get_deal_diagnostics` sample** (abbreviated):
+
+```jsonc
+// Request
+{ "deal_ids": ["floor_mismatch_004"], "min_severity": "warning" }
+
+// Response → structuredContent
+{
+  "period": { "start": "2026-04-27", "end": "2026-05-03" },
+  "deals": [
+    {
+      "deal_id": "floor_mismatch_004",
+      "deal_name": "Delta PMP — Sports Display",
+      "deal_type": "private_marketplace",
+      "buyer": "Delta Brands",
+      "ssp": "index",
+      "health_status": "critical",
+      "funnel": {
+        "eligible_ad_requests": 600000,
+        "deal_bid_requests": 580000,
+        "bid_responses": 400000,
+        "bids_above_floor": 20000,
+        "auction_wins": 8000,
+        "impressions": 8000,
+        "request_to_response_rate": 0.69,
+        "response_to_above_floor_rate": 0.05,
+        "above_floor_to_win_rate": 0.4,
+        "win_to_impression_rate": 1.0
+      },
+      "pacing": { "pacing_ratio": 0.06, "elapsed_fraction": 0.23, "basis": "booked_impressions", "confidence": "high", "on_track": false },
+      "issues": [
+        {
+          "code": "FLOOR_MISMATCH",
+          "severity": "critical",
+          "hypothesis": "Floor price is above the buyer's bid distribution; most bids are clipped.",
+          "confidence": "high",
+          "evidence": ["floor_price=$15.00 vs avg_bid_cpm=$6.00", "above_floor_to_win path filters out 95.00% of responses"],
+          "recommended_next_checks": ["Re-examine the deal's negotiated floor.", "Confirm the buyer's bid landscape on this deal."],
+          "recommended_actions": ["Lower the floor or renegotiate the deal CPM to align with the bid distribution."]
+        },
+        { "code": "UNDERPACING", "severity": "critical", "hypothesis": "Deal is underpacing on a booked_impressions basis.", "confidence": "high", "evidence": ["..."] }
+      ],
+      "warnings": []
+    }
+  ],
+  "total": 1,
+  "warnings": [],
+  "generated_at": "2026-05-04T00:00:00.000Z"
+}
+```
+
+Run `pnpm example:stdio` and ask Claude Desktop "diagnose deal floor_mismatch_004" — the stub backend ships five fixture deals (healthy PG, supply-constrained, low-bid PMP, floor mismatch, creative blocked) so each diagnostic rule fires at least once.
 
 ## Data model
 

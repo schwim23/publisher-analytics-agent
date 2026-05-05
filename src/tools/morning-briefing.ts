@@ -13,6 +13,7 @@ import {
 import { structured, fmtNum, fmtMoney, fmtPct } from '../extension/tool-result.js';
 import { handleGetPacingAlerts } from './pacing-alerts.js';
 import { handleGetYieldAnomalies } from './yield-anomalies.js';
+import { handleGetDealDiagnostics } from './deal-diagnostics.js';
 
 export const morningBriefingSchema = morningBriefingRequestSchema;
 
@@ -27,6 +28,8 @@ export const morningBriefingTool = {
       include_yield_anomalies: { type: 'boolean', description: 'Populate yield_anomalies section. Default: true.' },
       include_inventory_forecast: { type: 'boolean', description: 'Populate inventory_forecast_highlights. Default: false (more expensive).' },
       include_governance: { type: 'boolean', description: 'Populate governance_audit_issues. Default: false (backend-dependent).' },
+      include_deal_diagnostics: { type: 'boolean', description: 'Populate deal_diagnostics summary. Default: false (backend-dependent).' },
+      deal_ids: { type: 'array', items: { type: 'string' }, description: 'Restrict deal diagnostics to these deal IDs.' },
     },
   },
 };
@@ -132,6 +135,7 @@ export async function handleGetMorningBriefing(client: DataClient, args: Morning
   let yieldAnomalies: Array<{ dimension_key: string; metric: string; change_percent: number | null; severity: 'info' | 'warning' | 'critical'; headline: string }> = [];
   const inventoryHighlights: string[] = [];
   const governanceIssues: string[] = [];
+  let dealDiagnosticsSummary: Array<{ deal_id: string; deal_name: string | null; deal_type: string; health_status: string; top_issue: string | null; severity: 'info' | 'warning' | 'critical' | null }> = [];
 
   if (args.include_pacing_risks) {
     try {
@@ -205,6 +209,47 @@ export async function handleGetMorningBriefing(client: DataClient, args: Morning
     }
   }
 
+  if (args.include_deal_diagnostics) {
+    try {
+      const r = await handleGetDealDiagnostics(client, {
+        deal_ids: args.deal_ids,
+        date_range: { start: fmt(start), end: fmt(end) },
+        include_breakdown: false,
+        min_severity: 'warning',
+      });
+      const sc = r.structuredContent as {
+        deals: Array<{
+          deal_id: string;
+          deal_name: string | null;
+          deal_type: string;
+          health_status: string;
+          issues: Array<{ hypothesis: string; severity: 'info' | 'warning' | 'critical' }>;
+        }>;
+        warnings?: DataQualityWarning[];
+      };
+      dealDiagnosticsSummary = sc.deals
+        .filter((d) => d.health_status === 'critical' || d.health_status === 'at_risk')
+        .slice(0, 10)
+        .map((d) => ({
+          deal_id: d.deal_id,
+          deal_name: d.deal_name,
+          deal_type: d.deal_type,
+          health_status: d.health_status,
+          top_issue: d.issues[0]?.hypothesis ?? null,
+          severity: d.issues[0]?.severity ?? null,
+        }));
+      if (sc.warnings) for (const w of sc.warnings) {
+        if (!caveats.some((c) => c.code === w.code)) caveats.push(w);
+      }
+    } catch (err) {
+      caveats.push({
+        code: 'BACKEND_FALLBACK',
+        message: `Deal-diagnostics section failed to populate: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'info',
+      });
+    }
+  }
+
   if (args.include_governance) {
     // Try a light governance check across active media buys. Skipped silently
     // when the backend doesn't expose listMediaBuys / checkGovernance.
@@ -247,6 +292,7 @@ export async function handleGetMorningBriefing(client: DataClient, args: Morning
       yield_anomalies: yieldAnomalies,
       inventory_forecast_highlights: inventoryHighlights,
       governance_audit_issues: governanceIssues,
+      deal_diagnostics: dealDiagnosticsSummary,
       data_quality_caveats: caveats,
       recommended_actions: recommendedActions,
       generated_at: new Date().toISOString(),

@@ -30,6 +30,7 @@ const ANALYTICS_TOOLS = new Set([
   'get_inventory_forecast',
   'compare_periods',
   'get_plan_audit_logs',
+  'get_deal_diagnostics',
 ]);
 
 const CONSUMER_UTILITIES = new Set([

@@ -9,6 +9,7 @@ import { yieldAnomaliesTool, yieldAnomaliesSchema, handleGetYieldAnomalies } fro
 import { inventoryForecastTool, inventoryForecastSchema, handleGetInventoryForecast } from './inventory-forecast.js';
 import { comparePeriodsTool, comparePeriodsSchema, handleComparePeriods } from './compare-periods.js';
 import { auditLogsTool, auditLogsSchema, handleGetPlanAuditLogs } from './audit-logs.js';
+import { dealDiagnosticsTool, dealDiagnosticsSchema, handleGetDealDiagnostics } from './deal-diagnostics.js';
 import { visualizationTool, visualizationSchema, handleGenerateVisualization } from './visualization.js';
 import { capabilitiesTool, handleGetAdcpCapabilities, type CapabilitiesContext } from '../adcp/capabilities.js';
 
@@ -21,6 +22,7 @@ export const tools = [
   inventoryForecastTool,
   comparePeriodsTool,
   auditLogsTool,
+  dealDiagnosticsTool,
   visualizationTool,
 ];
 
@@ -56,6 +58,8 @@ export async function handleToolCall(
         return handleComparePeriods(client, comparePeriodsSchema.parse(args));
       case 'get_plan_audit_logs':
         return handleGetPlanAuditLogs(client, auditLogsSchema.parse(args));
+      case 'get_deal_diagnostics':
+        return handleGetDealDiagnostics(client, dealDiagnosticsSchema.parse(args));
       case 'generate_visualization':
         return handleGenerateVisualization(visualizationSchema.parse(args));
       default:

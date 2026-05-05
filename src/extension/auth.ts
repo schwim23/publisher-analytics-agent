@@ -56,6 +56,7 @@ export const TOOL_SCOPES: Record<string, Scope[]> = {
   get_inventory_forecast: ['analytics:read', 'analytics:forecast'],
   compare_periods: ['analytics:read'],
   get_plan_audit_logs: ['audit:read'],
+  get_deal_diagnostics: ['analytics:read'],
   generate_visualization: ['analytics:visualize'],
 };
 
