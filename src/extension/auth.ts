@@ -3,11 +3,14 @@
  *
  * Publisher revenue data is sensitive. Tools that touch it should run inside
  * an `AuthContext` carrying tenant/caller identity and scopes the caller has.
- * In HTTP mode the context is derived from the bearer token (or, in the
- * future, from request signing). In stdio/Claude-Desktop mode we run as a
+ * In HTTP mode the context is derived from the bearer token per request and
+ * carried via AsyncLocalStorage so MCP request handlers (which don't see the
+ * raw HTTP req) can access it. In stdio/Claude-Desktop mode we run as a
  * dev bypass, clearly labeled, with scopes set to a fully-permissive
  * superset and `mode: 'dev-bypass'` so the audit log captures the gap.
  */
+
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export type Scope =
   | 'analytics:read'
@@ -69,4 +72,18 @@ export function assertScopes(tool: string, ctx: AuthContext): void {
   if (ctx.mode === 'dev-bypass') return; // local-dev convenience; logged in audit
   const missing = required.filter((s) => !ctx.scopes.includes(s));
   if (missing.length) throw new ScopeDeniedError(tool, missing, ctx.scopes);
+}
+
+/**
+ * Per-request AuthContext store. The HTTP transport runs each `transport.handleRequest`
+ * inside `authContextStore.run(perRequestCtx, ...)` so MCP request handlers (which
+ * receive only `request.params`, not the raw HTTP req) can pull the active
+ * auth context out of ALS. The dispatch layer prefers the ALS value if present;
+ * the explicit `ctx` argument is the fallback used by stdio.
+ */
+export const authContextStore = new AsyncLocalStorage<AuthContext>();
+
+/** Returns the per-request auth context if running inside `authContextStore.run`, else `fallback`. */
+export function currentAuthContext(fallback: AuthContext): AuthContext {
+  return authContextStore.getStore() ?? fallback;
 }

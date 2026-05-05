@@ -30,11 +30,15 @@ export async function handleGetInventoryForecast(client: DataClient, args: Inven
   const histStart = new Date(histEnd); histStart.setUTCDate(histStart.getUTCDate() - 29);
   const fmt = (d: Date) => d.toISOString().split('T')[0];
 
+  // Use the typed `delivery_filter` (preferred) — backends translate to their
+  // native filter language. Pass the legacy PQL string too for GAM-style
+  // backends that haven't migrated yet (they'll match either or both).
   const historical = await client.getDeliveryReport({
     startDate: fmt(histStart),
     endDate: fmt(histEnd),
     dimensions: ['date', 'ad_unit'],
-    filter: `WHERE AD_UNIT_NAME = '${args.adUnit}'`,
+    delivery_filter: { ad_unit: args.adUnit },
+    filter: `WHERE AD_UNIT_NAME = '${args.adUnit.replace(/'/g, "\\'")}'`,
   });
 
   const caveats: string[] = [];
@@ -111,8 +115,20 @@ export async function handleGetInventoryForecast(client: DataClient, args: Inven
     ? Math.round((projectedImpressions / 1000) * avgEcpm * 100) / 100
     : null;
 
-  // Confidence interval based on sample variance over history
-  const ci = confidenceInterval(historical.map((r) => r.impressions ?? null).filter((v): v is number => v !== null), forecastDays);
+  // Two independent CIs — impressions and revenue — derived from per-day
+  // sample variance over the history window. Revenue CI is computed directly
+  // from per-day revenue samples, not by combining impression CI with eCPM
+  // (which would understate variance).
+  const impressionsCI = confidenceInterval(
+    historical.map((r) => r.impressions ?? null).filter((v): v is number => v !== null),
+    forecastDays,
+    0.8,
+  );
+  const revenuePerDay = historical.map((r) => {
+    const v = rowRevenue(r).value;
+    return v !== null && Number.isFinite(v) ? v : null;
+  }).filter((v): v is number => v !== null);
+  const revenueCI = confidenceInterval(revenuePerDay, forecastDays, 0.8);
 
   let confidence: ConfidenceLevel = 'medium';
   if (historical.length < 7) { confidence = 'low'; caveats.push(`Only ${historical.length} days of history available — confidence is low.`); }
@@ -134,7 +150,8 @@ export async function handleGetInventoryForecast(client: DataClient, args: Inven
       available_impressions: availableImpressions,
       projected_revenue: projectedRevenue,
       confidence,
-      confidence_interval: ci,
+      impressions_confidence_interval: impressionsCI,
+      revenue_confidence_interval: revenueCI,
       inputs: {
         history_days: historical.length,
         avg_daily_requests: avgDailyRequests,
@@ -147,9 +164,9 @@ export async function handleGetInventoryForecast(client: DataClient, args: Inven
     },
     text: (parsed) => [
       `Forecast for ${parsed.ad_unit} (${parsed.forecast_period.days} days; basis=${parsed.basis}; confidence=${parsed.confidence})`,
-      `  Projected impressions: ${fmtNum(parsed.projected_impressions)}${parsed.confidence_interval ? ` (CI ${fmtNum(parsed.confidence_interval.low)}–${fmtNum(parsed.confidence_interval.high)})` : ''}`,
+      `  Projected impressions: ${fmtNum(parsed.projected_impressions)}${parsed.impressions_confidence_interval ? ` (80% CI ${fmtNum(parsed.impressions_confidence_interval.low)}–${fmtNum(parsed.impressions_confidence_interval.high)})` : ''}`,
       `  Available impressions: ${fmtNum(parsed.available_impressions)}`,
-      `  Projected revenue: ${fmtMoney(parsed.projected_revenue)}`,
+      `  Projected revenue: ${fmtMoney(parsed.projected_revenue)}${parsed.revenue_confidence_interval ? ` (80% CI ${fmtMoney(parsed.revenue_confidence_interval.low)}–${fmtMoney(parsed.revenue_confidence_interval.high)})` : ''}`,
       (parsed.caveats ?? []).length ? `  Caveats: ${(parsed.caveats ?? [])[0]}${(parsed.caveats ?? []).length > 1 ? ` (+${(parsed.caveats ?? []).length - 1} more)` : ''}` : '',
     ].filter(Boolean).join('\n'),
   });
@@ -164,17 +181,35 @@ function sum(xs: number[]): number {
   return xs.reduce((s, v) => s + v, 0);
 }
 
-function confidenceInterval(impressionsPerDay: number[], forecastDays: number): { low: number | null; high: number | null } | undefined {
-  if (impressionsPerDay.length < 3) return undefined;
-  const mean = avg(impressionsPerDay)!;
-  const variance = impressionsPerDay.reduce((acc, v) => acc + (v - mean) ** 2, 0) / impressionsPerDay.length;
+/**
+ * Compute a confidence interval for a forecast value derived from per-day
+ * samples. Returns undefined when there aren't enough samples (< 3 days) for
+ * variance to be meaningful.
+ *
+ * Approach: standard normal approximation on the per-day mean × forecastDays.
+ * `level` is the two-sided coverage probability (e.g. 0.8 for 80%); the
+ * z-multiplier is set from common values.
+ */
+function confidenceInterval(perDay: number[], forecastDays: number, level: number): { level: number; low: number | null; high: number | null } | undefined {
+  if (perDay.length < 3) return undefined;
+  const mean = avg(perDay)!;
+  const variance = perDay.reduce((acc, v) => acc + (v - mean) ** 2, 0) / perDay.length;
   const sd = Math.sqrt(variance);
-  // 80% interval (≈1.28 SD)
-  const z = 1.28;
+  const z = zForLevel(level);
   const dailyLow = Math.max(0, mean - z * sd);
   const dailyHigh = mean + z * sd;
   return {
-    low: Math.round(dailyLow * forecastDays),
-    high: Math.round(dailyHigh * forecastDays),
+    level,
+    low: Math.round(dailyLow * forecastDays * 100) / 100,
+    high: Math.round(dailyHigh * forecastDays * 100) / 100,
   };
+}
+
+function zForLevel(level: number): number {
+  // Two-sided z-multipliers for common levels. Falls back to 1.28 (80%).
+  if (level >= 0.99) return 2.58;
+  if (level >= 0.95) return 1.96;
+  if (level >= 0.9) return 1.645;
+  if (level >= 0.8) return 1.282;
+  return 1.282;
 }

@@ -84,10 +84,12 @@ Multi-dimensional delivery report.
 **Request:** `DeliverySummaryRequest`
 - `startDate`, `endDate` (YYYY-MM-DD, required)
 - `dimensions: DimensionName[]` (default `["date"]`)
-- `filter` (optional, backend-specific opaque string)
+- `filter` (optional, backend-specific opaque string — **deprecated**; new code should use the typed `DeliveryFilter` on `DeliveryQuery` instead)
 
 **Response:** `DeliverySummaryResponse` — totals, rows (`DeliveryMetricRow[]`),
 warnings.
+
+**Filtering.** Backends consume a typed `DeliveryFilter` (see [DataClient](#dataclient-filter-contract) below), not opaque SQL/PQL strings. The legacy string filter is kept on `DeliveryQuery` for backward compatibility with GAM-style backends and SHOULD be ignored by new backends.
 
 ### `get_pacing_alerts`
 
@@ -100,12 +102,13 @@ confidence.
 
 ### `get_morning_briefing`
 
-Sectioned daily ops briefing.
+Sectioned daily ops briefing. Composes pacing + yield-anomaly sections inline by default; inventory and governance sections are opt-in.
 
-**Request:** `{ lookbackDays?: number (1-30, default 1) }`
-**Response:** sections — executive_summary, revenue_and_delivery, pacing_risks,
-yield_anomalies, inventory_forecast_highlights, governance_audit_issues,
-data_quality_caveats, recommended_actions.
+**Request:** `{ lookbackDays?: number (1-30, default 1), include_pacing_risks?: boolean (default true), include_yield_anomalies?: boolean (default true), include_inventory_forecast?: boolean (default false), include_governance?: boolean (default false) }`
+
+**Response:** sections — executive_summary, revenue_and_delivery, pacing_risks (populated when requested), yield_anomalies (populated when requested), inventory_forecast_highlights (opt-in), governance_audit_issues (opt-in), data_quality_caveats, recommended_actions.
+
+When a section is requested but its underlying call fails (or the data is insufficient), the briefing degrades to a `BACKEND_FALLBACK` or `INSUFFICIENT_HISTORY` caveat rather than an empty silent section.
 
 ### `get_yield_anomalies`
 
@@ -126,7 +129,12 @@ Project impressions + revenue for an ad unit over a future range.
 **Request:** `{ adUnit, startDate, endDate }`
 **Response:** projected & available impressions, projected revenue, basis
 (`historical_delivery` | `true_availability_unknown`), confidence (low/med/high),
-optional 80% confidence interval, caveats.
+caveats, plus two **separate** confidence intervals:
+
+- `impressions_confidence_interval: { level, low, high }` — derived from per-day impression sample variance over the history window. Always present when ≥ 3 days of impressions are available.
+- `revenue_confidence_interval: { level, low, high }` — derived from per-day **revenue** sample variance directly (not from impressions × eCPM, which would understate variance). Present only when ≥ 3 days of revenue samples exist.
+
+The two intervals are independent. Consumers MUST NOT compose a revenue interval by multiplying the impressions CI by an eCPM point estimate — that's how forecast errors compound silently.
 
 ### `compare_periods`
 
@@ -147,6 +155,31 @@ Publisher-side audit trail. On AdCP-backend deployments maps to the spec's
 ### `generate_visualization` (client utility, not AdCP surface)
 
 Turn a tool result into a chart spec for UI rendering.
+
+---
+
+## DataClient filter contract
+
+`DeliveryQuery` carries a typed `delivery_filter: DeliveryFilter` field. Backends MUST consume the typed filter for all new code; the legacy `filter` string is GAM-flavored PQL and SHOULD be silently ignored by non-GAM backends.
+
+```ts
+interface DeliveryFilter {
+  ad_unit?: string;
+  ad_unit_ids?: string[];
+  line_item_id?: string;
+  line_item_ids?: string[];
+  order_id?: string;
+  deal_id?: string;
+  demand_channel?: string;
+  device?: string;
+  geo?: string;
+  format?: string;
+  ssp?: string;
+  bidder?: string;
+}
+```
+
+Backends MUST silently ignore filter keys they don't support (no error). Future versions of the spec may add fields; current backends should not reject unknown ones.
 
 ---
 

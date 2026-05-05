@@ -3,18 +3,18 @@ import type { DataClient, DeliveryQuery } from '../src/data-client.js';
 import type { DeliveryRow } from '../src/adcp/types.js';
 import { handleGetMorningBriefing } from '../src/tools/morning-briefing.js';
 
-function buildClient(rowsByDimensions: Record<string, DeliveryRow[]>): DataClient {
+function buildClient(rowsByDimensions: Record<string, DeliveryRow[]>, opts: { allDelivery?: { mediaBuy: any; reports: any[] }[] } = {}): DataClient {
   return {
     getDeliveryReport: async (q: DeliveryQuery) => {
       const key = q.dimensions.join(',');
       return rowsByDimensions[key] ?? [];
     },
-    listMediaBuys: async () => [],
+    listMediaBuys: async () => (opts.allDelivery ?? []).map((d) => d.mediaBuy),
     getMediaBuyDelivery: async () => [],
     checkGovernance: async () => ({ mediaBuyId: 'x', passed: true, violations: [] }),
     getProducts: async () => [],
     getPlanAuditLogs: async () => [],
-    getAllDeliveryReports: async () => [],
+    getAllDeliveryReports: async () => opts.allDelivery ?? [],
   };
 }
 
@@ -69,6 +69,82 @@ describe('morning briefing composition', () => {
     expect(Array.isArray(sc.yield_anomalies)).toBe(true);
     expect(Array.isArray(sc.data_quality_caveats)).toBe(true);
     expect(Array.isArray(sc.recommended_actions)).toBe(true);
+  });
+
+  it('populates pacing_risks and yield_anomalies inline when the defaults are used', async () => {
+    const today = new Date();
+    const inFlight = (offsetDays: number) => new Date(today.getTime() + offsetDays * 86_400_000).toISOString().split('T')[0];
+
+    // For yield_anomalies the handler needs delivery rows under ad_unit;
+    // for pacing it needs media-buy + reports via getAllDeliveryReports.
+    const adUnitRows: DeliveryRow[] = [
+      { dimensions: { ad_unit: 'Homepage_Top' }, impressions: 50_000, clicks: 250, revenue: 250, ecpm: 0, ctr: 0.5, totalRequests: 0, fillRate: 0, ad_requests: 80_000, fill_rate: 0.625, revenue_net: 250 },
+    ];
+    const dateRows: DeliveryRow[] = [
+      { dimensions: { date: '2025-01-15' }, impressions: 50_000, clicks: 250, revenue: 250, ecpm: 0, ctr: 0.5, totalRequests: 0, fillRate: 0, ad_requests: 80_000, fill_rate: 0.625, revenue_net: 250 },
+    ];
+
+    const client = buildClient(
+      { 'date': dateRows, 'ad_unit': adUnitRows, 'ssp': [] },
+      {
+        allDelivery: [
+          {
+            mediaBuy: { id: 'mb_underpacing', name: 'Underpacing Q1', status: 'active', budget: 100_000, spend: 30_000, impressions: 1_500_000, clicks: 5_000, startDate: inFlight(-10), endDate: inFlight(10) },
+            reports: [{ mediaBuyId: 'mb_underpacing', date: inFlight(-1), impressions: 200_000, clicks: 600, spend: 500, pacing: 0.4 }],
+          },
+        ],
+      },
+    );
+
+    const result = await handleGetMorningBriefing(client, {
+      lookbackDays: 1,
+      include_pacing_risks: true,
+      include_yield_anomalies: true,
+      include_inventory_forecast: false,
+      include_governance: false,
+    });
+    const sc = result.structuredContent as {
+      pacing_risks: Array<{ severity: string; type: string }>;
+      yield_anomalies: unknown[];
+    };
+
+    // Pacing alert from the underdelivering buy should appear inline
+    expect(sc.pacing_risks.length).toBeGreaterThan(0);
+    expect(sc.pacing_risks.some((a) => a.type === 'underdelivery' || a.type === 'no_data' || a.type === 'overspend')).toBe(true);
+    // yield_anomalies array exists (may be empty given test data)
+    expect(Array.isArray(sc.yield_anomalies)).toBe(true);
+  });
+
+  it('does not populate pacing_risks when the option is false', async () => {
+    const client = buildClient(
+      { 'date': [], 'ad_unit': [], 'ssp': [] },
+      {
+        allDelivery: [
+          {
+            mediaBuy: { id: 'mb1', name: 'Test', status: 'active', budget: 100_000, spend: 30_000, impressions: 0, clicks: 0, startDate: '2025-01-01', endDate: '2025-12-31' },
+            reports: [{ mediaBuyId: 'mb1', date: '2025-01-15', impressions: 1000, clicks: 1, spend: 50, pacing: 0.3 }],
+          },
+        ],
+      },
+    );
+
+    const result = await handleGetMorningBriefing(client, {
+      lookbackDays: 1,
+      include_pacing_risks: false,
+      include_yield_anomalies: false,
+      include_inventory_forecast: false,
+      include_governance: false,
+    });
+    const sc = result.structuredContent as {
+      pacing_risks: unknown[];
+      yield_anomalies: unknown[];
+      inventory_forecast_highlights: unknown[];
+      governance_audit_issues: unknown[];
+    };
+    expect(sc.pacing_risks).toEqual([]);
+    expect(sc.yield_anomalies).toEqual([]);
+    expect(sc.inventory_forecast_highlights).toEqual([]);
+    expect(sc.governance_audit_issues).toEqual([]);
   });
 
   it('surfaces low-fill caveat when fill_rate is null', async () => {

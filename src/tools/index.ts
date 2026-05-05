@@ -1,6 +1,6 @@
 import type { DataClient } from '../data-client.js';
 import type { AuthContext } from '../extension/auth.js';
-import { assertScopes } from '../extension/auth.js';
+import { assertScopes, currentAuthContext } from '../extension/auth.js';
 import { withAudit } from '../extension/audit.js';
 import { deliverySummaryTool, deliverySummarySchema, handleGetDeliverySummary } from './delivery-summary.js';
 import { pacingAlertsTool, pacingAlertsSchema, handleGetPacingAlerts } from './pacing-alerts.js';
@@ -31,9 +31,14 @@ export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
 ) {
-  assertScopes(name, authContext);
+  // Prefer the per-request context from AsyncLocalStorage (populated by the
+  // HTTP transport for each call). Fall back to the explicit `authContext`
+  // argument used by stdio mode. This keeps stdio simple while letting HTTP
+  // pass per-request bearer + tenant + scopes without a global mutable.
+  const ctx = currentAuthContext(authContext);
+  assertScopes(name, ctx);
 
-  return withAudit(name, authContext, args, async () => {
+  return withAudit(name, ctx, args, async () => {
     switch (name) {
       case 'get_adcp_capabilities':
         return handleGetAdcpCapabilities(capabilitiesContext);

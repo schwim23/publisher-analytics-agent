@@ -4,21 +4,29 @@ import {
   morningBriefingResponseSchema,
   type MorningBriefingRequest,
   type DataQualityWarning,
+  type PacingAlert,
+  type YieldAnomaly,
 } from '../extension/schemas.js';
 import {
   rowRevenue, rowFillRate, rowAdRequests, sumOptional, computeEcpm, pickNumber,
 } from '../extension/metric-helpers.js';
 import { structured, fmtNum, fmtMoney, fmtPct } from '../extension/tool-result.js';
+import { handleGetPacingAlerts } from './pacing-alerts.js';
+import { handleGetYieldAnomalies } from './yield-anomalies.js';
 
 export const morningBriefingSchema = morningBriefingRequestSchema;
 
 export const morningBriefingTool = {
   name: 'get_morning_briefing',
-  description: 'Sectioned publisher network briefing: executive summary, revenue+delivery snapshot, pacing risks, yield anomalies, inventory highlights, governance issues, data-quality caveats, recommended actions. Designed for daily ops standup or exec digest.',
+  description: 'Sectioned publisher network briefing: executive summary, revenue+delivery snapshot, pacing risks, yield anomalies, inventory highlights, governance issues, data-quality caveats, recommended actions. Composes pacing + yield-anomaly sections inline by default. Designed for daily ops standup or exec digest.',
   inputSchema: {
     type: 'object' as const,
     properties: {
       lookbackDays: { type: 'number', description: 'Days to include (default: 1 = yesterday)' },
+      include_pacing_risks: { type: 'boolean', description: 'Populate pacing_risks section. Default: true.' },
+      include_yield_anomalies: { type: 'boolean', description: 'Populate yield_anomalies section. Default: true.' },
+      include_inventory_forecast: { type: 'boolean', description: 'Populate inventory_forecast_highlights. Default: false (more expensive).' },
+      include_governance: { type: 'boolean', description: 'Populate governance_audit_issues. Default: false (backend-dependent).' },
     },
   },
 };
@@ -116,6 +124,109 @@ export async function handleGetMorningBriefing(client: DataClient, args: Morning
   if (ecpmNet === null && ecpmGross === null) recommendedActions.push('Backend did not report publisher revenue; configure a revenue-aware data source for reliable yield analysis.');
   if (caveats.length > 3) recommendedActions.push(`Review ${caveats.length} data-quality caveats before acting on these numbers.`);
 
+  // Internal section composition — call the underlying tool handlers so we
+  // share their schema validation, hypothesis logic, and warning aggregation
+  // without recursing through MCP. Failures degrade to caveats rather than
+  // propagating up.
+  let pacingRisks: PacingAlert[] = [];
+  let yieldAnomalies: Array<{ dimension_key: string; metric: string; change_percent: number | null; severity: 'info' | 'warning' | 'critical'; headline: string }> = [];
+  const inventoryHighlights: string[] = [];
+  const governanceIssues: string[] = [];
+
+  if (args.include_pacing_risks) {
+    try {
+      const r = await handleGetPacingAlerts(client, { threshold: 0.8 });
+      const sc = r.structuredContent as { alerts: PacingAlert[]; warnings?: DataQualityWarning[] };
+      pacingRisks = sc.alerts;
+      if (sc.warnings) for (const w of sc.warnings) {
+        if (!caveats.some((c) => c.code === w.code)) caveats.push(w);
+      }
+    } catch (err) {
+      caveats.push({
+        code: 'BACKEND_FALLBACK',
+        message: `Pacing-risks section failed to populate: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'warning',
+      });
+    }
+  }
+
+  if (args.include_yield_anomalies) {
+    try {
+      const r = await handleGetYieldAnomalies(client, { lookbackDays: 14, dimensions: ['ad_unit'], minImpressions: 1000 });
+      const sc = r.structuredContent as { anomalies: YieldAnomaly[]; warnings?: DataQualityWarning[] };
+      // Map to the briefing's lighter shape.
+      yieldAnomalies = sc.anomalies.slice(0, 10).map((a) => ({
+        dimension_key: a.dimension_key,
+        metric: a.metric,
+        change_percent: a.change_percent,
+        severity: a.severity,
+        headline: (a.hypotheses && a.hypotheses[0]?.label) ?? `${a.metric} changed ${a.change_percent !== null ? `${a.change_percent}%` : ''} on ${a.dimension_key}`,
+      }));
+      if (sc.warnings) for (const w of sc.warnings) {
+        if (!caveats.some((c) => c.code === w.code)) caveats.push(w);
+      }
+    } catch (err) {
+      caveats.push({
+        code: 'BACKEND_FALLBACK',
+        message: `Yield-anomalies section failed to populate: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'warning',
+      });
+    }
+  }
+
+  if (args.include_inventory_forecast) {
+    // Highlight the top 3 ad units; brief 7-day projection. Skipped silently
+    // when there are no ad units in the window.
+    try {
+      const { handleGetInventoryForecast } = await import('./inventory-forecast.js');
+      const future = new Date(); future.setUTCDate(future.getUTCDate() + 1);
+      const futureEnd = new Date(future); futureEnd.setUTCDate(futureEnd.getUTCDate() + 6);
+      for (const u of topAdUnits.slice(0, 3)) {
+        if (!u.name || u.name === '(unknown)') continue;
+        const r = await handleGetInventoryForecast(client, { adUnit: u.name, startDate: fmt(future), endDate: fmt(futureEnd) });
+        const sc = r.structuredContent as { projected_impressions: number | null; projected_revenue: number | null; ad_unit: string };
+        if (sc.projected_impressions !== null) {
+          inventoryHighlights.push(`${sc.ad_unit}: ~${fmtNum(sc.projected_impressions)} impressions / ${fmtMoney(sc.projected_revenue)} projected over the next 7 days`);
+        }
+      }
+      if (inventoryHighlights.length === 0) {
+        caveats.push({
+          code: 'INSUFFICIENT_HISTORY',
+          message: 'Inventory forecast requested but no ad units had enough history to project.',
+          severity: 'info',
+        });
+      }
+    } catch (err) {
+      caveats.push({
+        code: 'BACKEND_FALLBACK',
+        message: `Inventory-forecast section failed to populate: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'warning',
+      });
+    }
+  }
+
+  if (args.include_governance) {
+    // Try a light governance check across active media buys. Skipped silently
+    // when the backend doesn't expose listMediaBuys / checkGovernance.
+    try {
+      const buys = await client.listMediaBuys({ status: 'active' });
+      for (const mb of buys.slice(0, 25)) {
+        const r = await client.checkGovernance(mb.id);
+        if (!r.passed) {
+          for (const v of r.violations) {
+            governanceIssues.push(`${mb.name} (${mb.id}): [${v.severity}] ${v.rule} — ${v.message}`);
+          }
+        }
+      }
+    } catch (err) {
+      caveats.push({
+        code: 'BACKEND_FALLBACK',
+        message: `Governance section failed to populate: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'info',
+      });
+    }
+  }
+
   return structured({
     schema: morningBriefingResponseSchema,
     data: {
@@ -132,10 +243,10 @@ export async function handleGetMorningBriefing(client: DataClient, args: Morning
         top_ad_units: topAdUnits,
         ssp_breakdown: sspBreakdown,
       },
-      pacing_risks: [], // populated by composing with get_pacing_alerts at the agent layer; left empty here
-      yield_anomalies: [],
-      inventory_forecast_highlights: [],
-      governance_audit_issues: [],
+      pacing_risks: pacingRisks,
+      yield_anomalies: yieldAnomalies,
+      inventory_forecast_highlights: inventoryHighlights,
+      governance_audit_issues: governanceIssues,
       data_quality_caveats: caveats,
       recommended_actions: recommendedActions,
       generated_at: new Date().toISOString(),

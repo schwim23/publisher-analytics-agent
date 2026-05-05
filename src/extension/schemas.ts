@@ -263,6 +263,14 @@ export type PacingAlertsResponse = z.infer<typeof pacingAlertsResponseSchema>;
 // get_morning_briefing
 export const morningBriefingRequestSchema = z.object({
   lookbackDays: z.number().int().min(1).max(30).default(1),
+  /** Compose pacing-risks section internally. Cheap (one delivery query). Default: true. */
+  include_pacing_risks: z.boolean().default(true),
+  /** Compose yield-anomalies section internally. Cheap-ish (one extra delivery query). Default: true. */
+  include_yield_anomalies: z.boolean().default(true),
+  /** Compose inventory-forecast highlights internally. More expensive (per-ad-unit forecasts). Default: false. */
+  include_inventory_forecast: z.boolean().default(false),
+  /** Compose governance/audit-issue summary internally. Backend-dependent; default false. */
+  include_governance: z.boolean().default(false),
 });
 export type MorningBriefingRequest = z.infer<typeof morningBriefingRequestSchema>;
 
@@ -349,6 +357,18 @@ export const inventoryForecastRequestSchema = z.object({
 });
 export type InventoryForecastRequest = z.infer<typeof inventoryForecastRequestSchema>;
 
+/**
+ * Confidence interval for a forecast value. The interval is metric-specific —
+ * an interval for impressions cannot be reused as an interval for revenue
+ * because revenue variance depends on both impression variance and eCPM
+ * variance, which are independent.
+ */
+export const confidenceIntervalSchema = z.object({
+  level: z.number().min(0).max(1).describe('Probability the true value falls in [low, high], e.g. 0.8 for 80%'),
+  low: z.number().nullable(),
+  high: z.number().nullable(),
+});
+
 export const inventoryForecastResponseSchema = z.object({
   ad_unit: z.string(),
   forecast_period: z.object({
@@ -361,10 +381,20 @@ export const inventoryForecastResponseSchema = z.object({
   available_impressions: z.number().nullable(),
   projected_revenue: z.number().nullable(),
   confidence: confidenceLevelSchema,
-  confidence_interval: z.object({
-    low: z.number().nullable(),
-    high: z.number().nullable(),
-  }).optional(),
+  /**
+   * 80% confidence interval on **projected_impressions only**, derived from
+   * impressions-per-day sample variance over the history window. This is NOT
+   * a revenue confidence interval — see `revenue_confidence_interval`.
+   */
+  impressions_confidence_interval: confidenceIntervalSchema.optional(),
+  /**
+   * 80% confidence interval on **projected_revenue**, derived from
+   * revenue-per-day sample variance. Present only when the history window
+   * contained enough revenue samples (≥ 3 days with non-null revenue);
+   * otherwise omitted. NOT computed by combining impressions CI with eCPM —
+   * computed directly from per-day revenue.
+   */
+  revenue_confidence_interval: confidenceIntervalSchema.optional(),
   inputs: z.object({
     history_days: z.number().int().nonnegative(),
     avg_daily_requests: z.number().nullable(),

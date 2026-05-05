@@ -190,6 +190,33 @@ await createPublisherAnalyticsServer({
 });
 ```
 
+### Honest backend implementation rules
+
+When implementing `DataClient.getDeliveryReport`, **do not fabricate values**. The agent depends on accurate data quality signaling:
+
+- **Use `null` for unavailable metrics**, not `0`. A `0` is a valid measurement; `null` means "not measured." The legacy `fillRate`/`totalRequests` numeric fields exist for backward compat — set them to `0` only if you also emit a `FILL_RATE_UNAVAILABLE` / `TOTAL_REQUESTS_UNAVAILABLE` warning on the row.
+- **Distinguish revenue semantics.** Populate `revenue_net` if the source backend reports publisher net revenue. Use `revenue_gross` for pre-rev-share. Use `buyer_spend` for buyer-reported spend (and emit `REVENUE_FROM_BUYER_SPEND`). The legacy `revenue` field stays for backward compat and can carry whichever you have.
+- **Emit `DataQualityWarning`s** on the row whenever a metric is null or derived. The codes are documented in `EXTENSION_SPEC.md`.
+- **Set `provenance`** with `source_system`, `source_task`, and `source_record_id` whenever you can map the value back to a specific upstream record.
+- **Honor `query.delivery_filter`** (typed). The legacy `query.filter` string is GAM-PQL-flavored and can be ignored if you don't speak that dialect.
+
+### Typed `DeliveryFilter`
+
+Prefer the typed filter over the legacy opaque PQL string in new code:
+
+```ts
+import type { DeliveryFilter } from 'publisher-analytics-agent';
+
+const filter: DeliveryFilter = {
+  ad_unit: 'Homepage_Top',
+  demand_channel: 'pmp',
+  device: 'mobile',
+  geo: 'US',
+};
+```
+
+Backends should silently ignore filter keys they don't support. The legacy `query.filter` string is still passed alongside for one minor version so GAM-style backends keep working.
+
 ---
 
 ## Transport: stdio (Claude Desktop)
@@ -258,6 +285,39 @@ Endpoints:
 | `GET /healthz` | Health check. No auth. |
 
 > Run TLS termination in front of this in production. Bearer-token check protects `/mcp/` but doesn't encrypt traffic.
+
+### Per-request auth context
+
+The HTTP transport builds an `AuthContext` for **each request** from the parsed `Authorization` header (mode, tenant_id stamp, scopes, plus a non-leaking caller_id derived from the token's first 6 characters). The context flows to MCP request handlers via Node `AsyncLocalStorage`, so a single server can serve concurrent callers without sharing state. The dispatch layer reads the per-request context via `currentAuthContext()`; `assertScopes` runs against it before the tool body.
+
+For multi-tenant deployments, replace the bearer→context mapping with your own:
+
+```ts
+import { authContextStore, type AuthContext } from 'publisher-analytics-agent';
+
+// In your custom HTTP handler, after validating the bearer token:
+const ctx: AuthContext = await mapTokenToTenantAndScopes(token);
+await authContextStore.run(ctx, () => transport.handleRequest(req, res));
+```
+
+### Auditing
+
+Every tool invocation emits an `AuditEvent` containing `auth_mode`, `tenant_id`, `caller_id`, `params_hash` (sha256-truncated), `params_keys` (top-level keys only — capped at 32), `status`, `warnings_count`, `error_code`, and `duration_ms`. The default sink writes to stderr and a 256-event ring buffer (accessible via `getRecentAuditEvents()`).
+
+**Raw revenue rows are never logged.** Only the hash and top-level key shape of params are kept.
+
+To plug in an external sink:
+
+```ts
+import { setAuditSink } from 'publisher-analytics-agent';
+
+setAuditSink((event) => {
+  // Ship to your audit pipeline — Datadog, BigQuery, Splunk, etc.
+  myLogger.info({ msg: 'mcp.tool.invoked', ...event });
+});
+```
+
+The sink receives the same struct the default writer formats; replace at most once per process at startup.
 
 ---
 

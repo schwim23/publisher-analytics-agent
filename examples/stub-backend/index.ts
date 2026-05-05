@@ -58,8 +58,23 @@ const stubClient: DataClient = {
       const tails = combinations(rest);
       return (dimSets[head] ?? ['']).flatMap((v) => tails.map((t) => ({ ...t, [head]: v })));
     }
+
+    // Honor the typed filter — silently drop combos that don't match.
+    const f = query.delivery_filter;
+    function matchesFilter(combo: Record<string, string>): boolean {
+      if (!f) return true;
+      if (f.ad_unit && combo['ad_unit'] && combo['ad_unit'] !== f.ad_unit) return false;
+      if (f.ssp && combo['ssp'] && combo['ssp'] !== f.ssp) return false;
+      if (f.device && combo['device'] && combo['device'] !== f.device) return false;
+      if (f.geo && combo['country'] && combo['country'] !== f.geo) return false;
+      if (f.format && combo['format'] && combo['format'] !== f.format) return false;
+      if (f.demand_channel && combo['demand_channel'] && combo['demand_channel'] !== f.demand_channel) return false;
+      return true;
+    }
+
     const fetchedAt = new Date().toISOString();
     for (const combo of combinations(query.dimensions)) {
+      if (!matchesFilter(combo)) continue;
       const seed = JSON.stringify(combo);
       const impressions = Math.floor(pseudo(seed) * 50_000) + 1_000;
       const ctr = 0.005 + pseudo(seed + 'ctr') * 0.02;

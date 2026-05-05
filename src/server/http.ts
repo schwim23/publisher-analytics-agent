@@ -6,7 +6,7 @@ import type { DataClient } from '../data-client.js';
 import { tools, handleToolCall } from '../tools/index.js';
 import { toErrorEnvelope } from '../adcp/error-envelope.js';
 import type { CapabilitiesContext } from '../adcp/capabilities.js';
-import { ALL_SCOPES, DEV_BYPASS_CONTEXT, type AuthContext, type Scope } from '../extension/auth.js';
+import { ALL_SCOPES, DEV_BYPASS_CONTEXT, authContextStore, type AuthContext, type Scope } from '../extension/auth.js';
 
 export interface HttpServerOptions {
   dataClient: DataClient;
@@ -55,22 +55,22 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-  // Single-tenant bearer-mode AuthContext. The HTTP layer (below) rejects
-  // unauthorized requests with a 401 before they ever reach this handler;
-  // any request that gets here is authenticated. Multi-tenant deployments
-  // should swap this for an AsyncLocalStorage-backed context per request.
-  const bearerAuthContext: AuthContext = {
-    mode: 'bearer',
-    tenant_id: opts.tenantId,
-    caller_id: 'bearer',
-    scopes: opts.bearerScopes ?? ALL_SCOPES,
-  };
-  const activeAuthContext: AuthContext = opts.bearerToken ? bearerAuthContext : DEV_BYPASS_CONTEXT;
+  // Default fallback context — used by stdio-style direct dispatch and as the
+  // baseline when HTTP requests have no bound ALS store. The HTTP layer below
+  // rebuilds an AuthContext per request and runs the MCP transport inside
+  // `authContextStore.run(...)`, so the dispatch picks up the per-request
+  // identity via `currentAuthContext()` rather than this fallback.
+  const fallbackAuthContext: AuthContext = opts.bearerToken
+    ? { mode: 'bearer', tenant_id: opts.tenantId, caller_id: 'bearer', scopes: opts.bearerScopes ?? ALL_SCOPES }
+    : DEV_BYPASS_CONTEXT;
 
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     try {
-      return await handleToolCall(opts.dataClient, capabilitiesContext, activeAuthContext, name, args as Record<string, unknown>);
+      // handleToolCall internally prefers the ALS-stored AuthContext. The
+      // explicit fallback only kicks in when no ALS store is bound (e.g.
+      // direct programmatic invocation outside the HTTP transport).
+      return await handleToolCall(opts.dataClient, capabilitiesContext, fallbackAuthContext, name, args as Record<string, unknown>);
     } catch (err) {
       const env = toErrorEnvelope(err);
       return {
@@ -83,14 +83,32 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   await mcpServer.connect(transport);
 
+  function extractBearer(req: IncomingMessage): string | null {
+    const raw = req.headers['authorization'];
+    const presented = Array.isArray(raw) ? raw[0] : raw;
+    if (!presented) return null;
+    return presented.startsWith('Bearer ') ? presented.slice(7) : presented;
+  }
+
   function isAuthorized(req: IncomingMessage): boolean {
     if (!opts.bearerToken) return true;
     // AdCP 3.0 uses standard `Authorization: Bearer <token>`.
-    const raw = req.headers['authorization'];
-    const presented = Array.isArray(raw) ? raw[0] : raw;
-    if (!presented) return false;
-    const token = presented.startsWith('Bearer ') ? presented.slice(7) : presented;
-    return token === opts.bearerToken;
+    const token = extractBearer(req);
+    return token !== null && token === opts.bearerToken;
+  }
+
+  function buildPerRequestAuthContext(req: IncomingMessage): AuthContext {
+    if (!opts.bearerToken) return DEV_BYPASS_CONTEXT;
+    const token = extractBearer(req);
+    return {
+      mode: 'bearer',
+      tenant_id: opts.tenantId,
+      // Use the (rough) token-fingerprint as caller_id so the audit log can
+      // distinguish callers with different tokens without leaking the token
+      // itself. Multi-tenant deployments should swap this for a real lookup.
+      caller_id: token ? `bearer:${token.slice(0, 6)}` : 'bearer',
+      scopes: opts.bearerScopes ?? ALL_SCOPES,
+    };
   }
 
   function writeJson(res: ServerResponse, status: number, body: unknown): void {
@@ -129,8 +147,13 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
 
     if ((req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE') && (pathname === '/mcp' || pathname === '/mcp/')) {
       if (!isAuthorized(req)) return writeUnauthorized(res);
+      const perRequestCtx = buildPerRequestAuthContext(req);
       try {
-        await transport.handleRequest(req, res);
+        // Run the MCP transport inside the ALS store so any tool dispatched
+        // by this request sees the per-request AuthContext via
+        // `currentAuthContext()` — including caller_id (bearer fingerprint),
+        // tenant_id, and scopes.
+        await authContextStore.run(perRequestCtx, () => transport.handleRequest(req, res));
       } catch (err) {
         if (!res.headersSent) {
           writeJson(res, 500, {
